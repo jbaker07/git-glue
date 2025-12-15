@@ -1,0 +1,22 @@
+# build + runtime
+target/
+logs/
+state/
+json_files/
+*.log
+*.out
+
+# local / env
+target_user/
+.venv/
+venv/
+node_modules/
+*.pyc
+*.pyo
+*.o
+*.so
+*.d
+
+# editor junk
+.DS_Store
+*.swp
