@@ -13,7 +13,7 @@ use crate::episode::Episode;
 use crate::event::{Event, EventType};
 use crate::telemetry::push_feature_as_signal;
 use crate::telemetry_writer::write_telemetry_record;
-use crate::gnn_hook::push_to_gnn_vector_log;
+use crate::gnn::hook::push_to_gnn_vector_log;
 use crate::modules::replay_writer::store_replay_event;
 
 // ---------- Public API ----------

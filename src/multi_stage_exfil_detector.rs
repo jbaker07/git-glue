@@ -3,9 +3,9 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::path::Path;
 use walkdir::WalkDir;
 
-use crate::trust_hook::{submit_trust_event, TrustEvent};
+use crate::trust::hook::{submit_trust_event, TrustEvent};
 use crate::telemetry_writer::write_telemetry_record;
-use crate::gnn_hook::push_to_gnn_vector_log;
+use crate::gnn::hook::push_to_gnn_vector_log;
 
 /// File staging patterns typical of exfil attempts
 const STAGING_DIRS: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];

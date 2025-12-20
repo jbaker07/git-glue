@@ -4,7 +4,7 @@ use std::fs::{create_dir_all, OpenOptions};
 use std::io::Write;
 
 use crate::telemetry::TelemetryRecord;
-use crate::trust_hook::TrustEvent;
+use crate::trust::hook::TrustEvent;
 
 pub fn explain<T>(events: &[TrustEvent], _records: &[TelemetryRecord], _data: &T) -> Result<()> {
     // Sort a copy of references by decreasing risk score (fallback to 0.0 if needed)

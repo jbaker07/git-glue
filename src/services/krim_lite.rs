@@ -12,7 +12,7 @@ use crate::episode::Episode;
 use crate::graph_builder::{GraphEdge, GraphNode};
 
 use crate::telemetry::TelemetryRecord;
-use crate::trust_hook::TrustEvent;
+use crate::trust::hook::TrustEvent;
 
 // ---------- Config / weights ----------
 

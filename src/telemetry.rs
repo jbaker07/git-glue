@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::borrow::Cow;
 
-use crate::gnn_hook::push_to_gnn_vector_log;
+use crate::gnn::hook::push_to_gnn_vector_log;
 use crate::modules::auth_monitor::{scan_auth_activity, start_auth_monitor};
 //use crate::modules::container_monitor::scan_container_activity;    // requires aya
 //#[cfg(all(target_os = "linux", feature = "ebpf"))]

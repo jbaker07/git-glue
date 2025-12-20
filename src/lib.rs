@@ -14,6 +14,7 @@ pub mod event;
 pub mod explain;
 pub mod features;
 pub mod forensic;
+pub mod gnn;          // Facade: enforces single GNN authority (gnn_hook + gnn_models)
 pub mod gnn_bridge;
 pub mod gnn_hook;
 pub mod gnn_models;
@@ -56,6 +57,7 @@ pub mod telemetry;
 pub mod telemetry_types;
 pub mod telemetry_writer;
 pub mod traits;
+pub mod trust;                // Facade: enforces single trust authority (digest_engine + hook)
 pub mod trust_digest_engine;
 pub mod trust_hook;
 pub mod utils;

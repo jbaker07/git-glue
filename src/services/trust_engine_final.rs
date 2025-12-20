@@ -1,7 +1,7 @@
 use crate::adaptive_threshold_engine::{
     evaluate_role_thresholds, load_role_profile_map, AdaptiveThresholdEngine,
 };
-use crate::gnn_hook::{export_trust_vector_to_gnn, stream_to_gnn_fifo};
+use crate::gnn::hook::{export_trust_vector_to_gnn, stream_to_gnn_fifo};
 use crate::logger::log;
 use crate::modules::telemetry_fingerprint::{is_known_good, load_fingerprint_db};
 use crate::score_reason::ScoreReason;

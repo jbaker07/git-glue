@@ -4,7 +4,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use crate::telemetry::TelemetryRecord;
-use crate::trust_hook::TrustEvent;
+use crate::trust::hook::TrustEvent;
 
 const ALERTS_PATH: &str = "logs/alerts.jsonl";
 const LOGS_DIR: &str = "logs";

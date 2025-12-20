@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
-use crate::gnn_hook::push_to_gnn_vector_log;
+use crate::gnn::hook::push_to_gnn_vector_log;
 use crate::modules::replay_writer::store_replay_event;
 use crate::services::baseline_uid::BaselineStore;
 use crate::services::krim_lite::analyze_episode_and_score;
