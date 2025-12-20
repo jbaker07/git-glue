@@ -27,7 +27,9 @@ embed_bpf = []
 ebpf = []
 with-ebpf = []
 with-ebpf-load = []
-gnn = []  # GNN hooks and graph infrastructure (disabled by default for "NO GNN")
+gnn = []  # GNN hooks and graph infrastructure (disabled by default)
+forensic = []  # Advanced endpoint forensics (ebpf, modules, file/process monitoring)
+advanced_scoring = []  # Optional scoring pipelines (yara, elastic, ecs, explain)
 
 [dependencies]
 # --- web / http ---
