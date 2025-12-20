@@ -1,0 +1,37 @@
+---
+# playbooks/common/signal_new_remote_ip.yaml
+# Detect new remote IP addresses (lateral movement, C2)
+
+name: "New Remote IP Detection"
+description: "Alert on executables connecting to previously unseen remote IPs"
+version: "1.0"
+
+detection:
+  signal:
+    type: "new_remote_ip_for_exe"
+    
+  baseline:
+    window_days: 30
+    min_distinct_ips_for_baseline: 5
+    
+  anomaly_detection:
+    zscore_threshold: 3.0
+    allow_private_ranges: false
+
+response:
+  severity: "medium"
+  actions:
+    - alert: true
+    - isolate: false
+    - log_full_context: true
+
+correlation_boost:
+  - executable_unsigned: 1.3
+  - process_created_recently: 1.2
+  - high_connection_rate: 1.5
+  - combined_with_lolbin: 2.0
+
+tags:
+  - "T1570"
+  - "lateral_movement"
+  - "command_and_control"

@@ -224,6 +224,7 @@ pub fn send_to_gnn_daemon(trust_vector: TrustVector, _tags: Vec<String>) {
         }
     }
 }
+} // End cfg(feature="gnn")
 
 // NO-OP stub implementations when "gnn" feature is OFF (default)
 #[cfg(not(feature = "gnn"))]

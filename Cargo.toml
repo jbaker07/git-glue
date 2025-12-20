@@ -7,7 +7,7 @@ resolver = "2"
 # make the library target explicit so the bin can import it as `forensic_hooks::...`
 [lib]
 name = "forensic_hooks"
-path = "src/lib.rs"
+path = "core/lib.rs"
 
 [[bin]]
 name = "entmon_attach"
