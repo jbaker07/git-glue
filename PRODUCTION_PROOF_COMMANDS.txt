@@ -1,0 +1,200 @@
+MODEL A PRODUCTION - HARD PROOF COMMANDS
+=========================================
+
+Exact commands + expected outputs. All commands assume you're in the git-glue directory.
+
+═══════════════════════════════════════════════════════════════════════════════
+PART 0: BUILD & AUDIT PREFLIGHT
+═══════════════════════════════════════════════════════════════════════════════
+
+Build release binaries:
+
+  $ cargo build --release --bin capture_macos_rotating --bin edr_locald --bin ui_server
+
+Expected output (final line):
+  Finished `release` profile [optimized] target(s) in X.XXs
+
+Test audit preflight on capture (no root required for check):
+
+  $ ./target/release/capture_macos_rotating --telemetry-root /tmp/test_audit 2>&1 | head -20
+
+Expected output (if audit enabled):
+  capture_macos_rotating: Production OpenBSM pipeline
+  AUDIT PREFLIGHT CHECK
+  OS Version: 14.X.X
+  
+  [1/4] auditd service running: ✓ YES
+  [2/4] /dev/auditpipe accessible: ✓ YES
+  [3/4] /etc/security/audit_control exists: ✓ YES
+  [4/4] Audit enabled via 'audit -c': ✓ YES
+  
+  ✅ AUDIT SUBSYSTEM OPERATIONAL
+
+If audit is DISABLED, you'll see remediation steps.
+
+═══════════════════════════════════════════════════════════════════════════════
+PART 1: TELEMETRY_ROOT PORTABLE RESOLUTION
+═══════════════════════════════════════════════════════════════════════════════
+
+Test CLI override:
+
+  $ ./target/release/capture_macos_rotating --telemetry-root /tmp/cli_test 2>&1 | grep TELEMETRY_ROOT
+
+Expected:
+  TELEMETRY_ROOT: /tmp/cli_test
+
+Test env var:
+
+  $ export EDR_TELEMETRY_ROOT=/tmp/env_test
+  $ ./target/release/edr_locald 2>&1 | head -5 | grep TELEMETRY_ROOT
+
+Expected:
+  TELEMETRY_ROOT: /tmp/env_test
+
+Reset for remaining tests:
+
+  $ export EDR_TELEMETRY_ROOT=/tmp/modela_proof_test
+  $ rm -rf $EDR_TELEMETRY_ROOT && mkdir -p $EDR_TELEMETRY_ROOT/segments
+
+═══════════════════════════════════════════════════════════════════════════════
+PART 2: SCHEMA VERSIONING
+═══════════════════════════════════════════════════════════════════════════════
+
+After running services, check index.json:
+
+  $ cat $EDR_TELEMETRY_ROOT/index.json | python3 -m json.tool | head -10
+
+Expected:
+  {
+    "schema_version": 1,
+    "segments": [...]
+
+Check event schema (if events captured):
+
+  $ head -1 $EDR_TELEMETRY_ROOT/segments/segment_seg_*.jsonl 2>/dev/null | \
+    python3 -c "import sys, json; e = json.load(sys.stdin); print('v:', e.get('schema_version')); print('keys:', list(e.keys())[:5])"
+
+Expected:
+  v: 1
+  keys: ['schema_version', 'ts_ms', 'host', 'event_type', 'subject']
+
+═══════════════════════════════════════════════════════════════════════════════
+PART 3: CHECKPOINT TABLE & RESTART SAFETY
+═══════════════════════════════════════════════════════════════════════════════
+
+Start locald:
+
+  $ ./target/release/edr_locald --telemetry-root $EDR_TELEMETRY_ROOT &
+  $ sleep 2
+
+Verify checkpoint table:
+
+  $ sqlite3 $EDR_TELEMETRY_ROOT/analysis.db ".tables"
+
+Expected:
+  locald_checkpoint  telemetry_events  incidents
+
+Check idempotency:
+
+  $ BEFORE=$(sqlite3 $EDR_TELEMETRY_ROOT/analysis.db "SELECT COUNT(*) FROM telemetry_events;")
+  $ echo "Events before restart: $BEFORE"
+  $ pkill -f "edr_locald"
+  $ sleep 1
+  $ ./target/release/edr_locald --telemetry-root $EDR_TELEMETRY_ROOT &
+  $ sleep 2
+  $ AFTER=$(sqlite3 $EDR_TELEMETRY_ROOT/analysis.db "SELECT COUNT(*) FROM telemetry_events;")
+  $ echo "Events after restart: $AFTER"
+  $ [ "$BEFORE" -eq "$AFTER" ] && echo "✓ IDEMPOTENT" || echo "✗ DUPLICATES"
+
+Expected:
+  ✓ IDEMPOTENT
+
+═══════════════════════════════════════════════════════════════════════════════
+PART 4: EVIDENCE DEREF (CRITICAL)
+═══════════════════════════════════════════════════════════════════════════════
+
+Start all services:
+
+  $ pkill -f "capture_macos\|edr_locald\|ui_server" 2>/dev/null || true
+  $ rm -rf $EDR_TELEMETRY_ROOT && mkdir -p $EDR_TELEMETRY_ROOT/segments
+  
+  $ sudo -E ./target/release/capture_macos_rotating --telemetry-root $EDR_TELEMETRY_ROOT &
+  $ ./target/release/edr_locald --telemetry-root $EDR_TELEMETRY_ROOT &
+  $ ./target/release/ui_server --telemetry-root $EDR_TELEMETRY_ROOT &
+  $ sleep 3
+
+Test API health:
+
+  $ curl -s http://127.0.0.1:8000/api/health | python3 -m json.tool
+
+Expected:
+  {
+    "ok": true,
+    "message": null
+  }
+
+Test explain (evidence deref):
+
+  $ IID=$(sqlite3 $EDR_TELEMETRY_ROOT/analysis.db "SELECT incident_id FROM incidents LIMIT 1;" 2>/dev/null)
+  $ if [ -n "$IID" ]; then
+      curl -s "http://127.0.0.1:8000/api/incidents/$IID/explain" | python3 -m json.tool | head -30
+    fi
+
+Expected structure (if incident exists):
+  {
+    "incident_id": "...",
+    "timeline": [
+      {
+        "ts": XXX,
+        "evidence_ptr": {
+          "segment_id": "...",
+          "record_index": 0,
+          ...
+        },
+        "raw_event": {...}  ← Dereferenced from JSONL
+      }
+    ]
+  }
+
+═══════════════════════════════════════════════════════════════════════════════
+PART 5: DETECTION MATRIX (REAL COMMANDS)
+═══════════════════════════════════════════════════════════════════════════════
+
+Run matrix:
+
+  $ sudo -E scripts/macos/run_detection_matrix.sh --telemetry-root $EDR_TELEMETRY_ROOT
+
+Expected:
+  [1/5] TEST: Process Execution
+  [2/5] TEST: Suspicious exec from /tmp
+  [3/5] TEST: LaunchAgent persistence
+  [4/5] TEST: osascript
+  [5/5] TEST: Sudo
+  
+  DETECTION MATRIX COMPLETE
+  Reports: (path shown)
+
+Review gap report:
+
+  $ cat <REPORT_PATH>/gap_report.csv | head -5
+
+═══════════════════════════════════════════════════════════════════════════════
+PART 6: CLEANUP
+═══════════════════════════════════════════════════════════════════════════════
+
+  $ pkill -f "capture_macos\|edr_locald\|ui_server" 2>/dev/null || true
+  $ rm -rf $EDR_TELEMETRY_ROOT
+
+═══════════════════════════════════════════════════════════════════════════════
+
+KEY ACHIEVEMENTS:
+
+✅ Audit preflight: Detects if OpenBSM is enabled
+✅ Root validation: Enforced at startup
+✅ TELEMETRY_ROOT: Portable (CLI → env → default)
+✅ Schema versioning: All events versioned
+✅ Checkpoint: Restart-safe, idempotent ingestion
+✅ Evidence deref: incident → raw JSON in timeline
+✅ Real commands: Matrix uses actual shell commands
+✅ Production ready: All binaries compile, no stubs
+

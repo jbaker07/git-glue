@@ -5,6 +5,15 @@ state/
 json_files/
 *.log
 *.out
+*.err
+*errors*.txt
+cargo-check.txt
+cargo-runner.txt
+run_output.txt
+edr-digest-*.txt
+
+# telemetry outputs
+telemetry_output_demo/
 
 # local / env
 target_user/
