@@ -27,6 +27,7 @@ embed_bpf = []
 ebpf = []
 with-ebpf = []
 with-ebpf-load = []
+gnn = []  # GNN hooks and graph infrastructure (disabled by default for "NO GNN")
 
 [dependencies]
 # --- web / http ---

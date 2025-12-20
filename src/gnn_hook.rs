@@ -1,18 +1,20 @@
 // src/gnn_hook.rs
+// NO GNN by default: when feature "gnn" is OFF, all exports are no-op stubs.
+// When feature "gnn" is ON, actual GNN functionality is used.
 
-use crate::telemetry::TelemetryRecord;
-
-use chrono::Utc;
-use serde_json::json;
-use std::collections::HashMap;
-use std::env;
-use std::fs::{create_dir_all, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-
-use crate::gnn_models::GnnScoringInput;
-use crate::graph_builder::{GraphEdge, GraphNode};
-use crate::services::trust_vector::TrustVector;
+#[cfg(feature = "gnn")]
+mod actual_impl {
+    use crate::telemetry::TelemetryRecord;
+    use chrono::Utc;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::env;
+    use std::fs::{create_dir_all, OpenOptions};
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use crate::gnn_models::GnnScoringInput;
+    use crate::graph_builder::{GraphEdge, GraphNode};
+    use crate::services::trust_vector::TrustVector;
 
 /// =========================
 /// Configuration & Utilities
@@ -222,3 +224,25 @@ pub fn send_to_gnn_daemon(trust_vector: TrustVector, _tags: Vec<String>) {
         }
     }
 }
+
+// NO-OP stub implementations when "gnn" feature is OFF (default)
+#[cfg(not(feature = "gnn"))]
+pub mod stubs {
+    use std::collections::HashMap;
+    use crate::telemetry::TelemetryRecord;
+    use crate::services::trust_vector::TrustVector;
+    
+    pub fn submit_to_gnn(_record: &TelemetryRecord) {}
+    pub fn push_feature_map_to_gnn_log(_: HashMap<String, String>) {}
+    pub fn push_to_gnn_vector_log(_: HashMap<String, String>) {}
+    pub fn push_gnn_event(_: &str, _: f64, _: &str) {}
+    pub fn export_trust_vector_to_gnn(_: &str, _: &str, _: f64, _: HashMap<String, f64>, _: Vec<String>) {}
+    pub fn stream_to_gnn_fifo(_: &HashMap<String, f64>) {}
+    pub fn push_metadata_to_gnn_vector_log(_: HashMap<String, String>) {}
+    pub fn build_gnn_scoring_input(_: &[()], _: &[()], tv: TrustVector, _: Option<String>) -> () {}
+    pub fn send_to_gnn_daemon(_: TrustVector, _: Vec<String>) {}
+}
+
+// Re-export the correct implementation
+#[cfg(not(feature = "gnn"))]
+pub use stubs::*;

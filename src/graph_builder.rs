@@ -1,4 +1,6 @@
 // src/graph_builder.rs
+// NO GNN by default: provide stub types when "gnn" feature is OFF.
+
 use serde::{Deserialize, Serialize};
 
 /// Lightweight node representation used for causal / process graphs.
