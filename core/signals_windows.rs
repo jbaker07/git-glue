@@ -1,8 +1,18 @@
 // core/signals_windows.rs
 // Windows-specific signals (deterministic, evidence-backed)
 // Reuses core SignalEngine; these are signal types only
+// Severity tiers: LOW (0.3-0.5), MEDIUM (0.5-0.7), HIGH (0.7-0.9), CRITICAL (0.9+)
+// Consensus escalation: tamper + any high signal → escalate 1.5x
 
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SeverityTier {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum WindowsSignal {
@@ -125,24 +135,35 @@ impl WindowsSignal {
         }
     }
 
-    /// Default baseline score (0.0..=1.0) for this signal type
-    pub fn baseline_score(&self) -> f32 {
+    /// Discrete severity tier for this signal (low, medium, high, critical)
+    pub fn severity(&self) -> &'static str {
         match self {
-            Self::LolbinAbuse { .. } => 0.65,
-            Self::UserWritableExec { .. } => 0.50,
-            Self::InterpreterExecFromWritable { .. } => 0.60,
-            Self::SuspiciousServicePersistence { .. } => 0.70,
-            Self::ScheduledTaskPersistence { .. } => 0.65,
-            Self::RegistryRunKeyPersistence { .. } => 0.60,
-            Self::NewRemoteIpForExe { .. } => 0.55,
-            Self::HighConnRateBurst { .. } => 0.70,
-            Self::LogonAnomalyBurst { .. } => 0.65,
-            Self::DefenseEvasionAttempt { .. } => 0.75,
-            Self::LateralMovementHint { .. } => 0.70,
-            Self::WmiExecution { .. } => 0.50,
-            Self::ScriptExecution { .. } => 0.55,
-            Self::CredentialDumpAttempt { .. } => 0.80,
-            Self::RegistryManipulation { .. } => 0.45,
+            Self::LolbinAbuse { .. } => "high",
+            Self::UserWritableExec { .. } => "medium",
+            Self::InterpreterExecFromWritable { .. } => "medium",
+            Self::SuspiciousServicePersistence { .. } => "high",
+            Self::ScheduledTaskPersistence { .. } => "high",
+            Self::RegistryRunKeyPersistence { .. } => "medium",
+            Self::NewRemoteIpForExe { .. } => "medium",
+            Self::HighConnRateBurst { .. } => "high",
+            Self::LogonAnomalyBurst { .. } => "high",
+            Self::DefenseEvasionAttempt { .. } => "critical",
+            Self::LateralMovementHint { .. } => "high",
+            Self::WmiExecution { .. } => "medium",
+            Self::ScriptExecution { .. } => "medium",
+            Self::CredentialDumpAttempt { .. } => "critical",
+            Self::RegistryManipulation { .. } => "low",
+        }
+    }
+
+    /// Baseline score (0.0..=1.0) derived from severity tier
+    pub fn baseline_score(&self) -> f32 {
+        match self.severity() {
+            "low" => 0.4,
+            "medium" => 0.6,
+            "high" => 0.75,
+            "critical" => 0.95,
+            _ => 0.5,
         }
     }
 }

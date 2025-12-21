@@ -38,7 +38,7 @@ impl SysmonAdapter {
     }
 
     /// Convert Sysmon event to canonical core::Event
-    /// Priority event IDs: 1 (Process), 3 (Network), 7 (ImageLoad), 22 (DNS), 23 (FileCreate)
+    /// Event IDs: 1 (Process), 3 (Network), 7 (ImageLoad), 11 (FileCreate), 22 (DNS), 26 (FileDelete)
     pub fn to_canonical_event(&self, event: &SysmonEvent) -> Option<crate::Event> {
         use crate::event::EventType;
 
@@ -110,9 +110,9 @@ impl SysmonAdapter {
                     ..Default::default()
                 });
             },
-            23 => {
-                // File created (Sysmon 23)
-                let file_name = event.fields.get("FileName").cloned();
+            11 => {
+                // File created (Sysmon 11)
+                let file_name = event.fields.get("TargetFilename").cloned();
                 let exe = event.fields.get("Image").cloned();
                 let pid = event.fields.get("ProcessId").and_then(|s| s.parse().ok());
 
@@ -122,6 +122,21 @@ impl SysmonAdapter {
                     pid,
                     exe,
                     tags: vec!["windows_sysmon".to_string(), "file_create".to_string(), file_name.unwrap_or_default()],
+                    ..Default::default()
+                });
+            },
+            26 => {
+                // File deleted (Sysmon 26)
+                let file_name = event.fields.get("FileName").cloned();
+                let exe = event.fields.get("Image").cloned();
+                let pid = event.fields.get("ProcessId").and_then(|s| s.parse().ok());
+
+                return Some(crate::Event {
+                    ts: event.ts,
+                    event_type: EventType::Other,
+                    pid,
+                    exe,
+                    tags: vec!["windows_sysmon".to_string(), "file_delete".to_string(), file_name.unwrap_or_default()],
                     ..Default::default()
                 });
             },

@@ -1,10 +1,12 @@
 // windows/sensors/etw_adapter.rs
-// ETW (Event Tracing for Windows) adapter — best-effort, feature-gated
-// Covers: Process/Thread, ImageLoad, TCP connect, DNS (if feasible)
+// ETW (Event Tracing for Windows) adapter — best-effort, feature-gated cfg(windows_etw)
+// Providers: Microsoft-Windows-Kernel-Process, Microsoft-Windows-Kernel-ImageLoad, Microsoft-Windows-TCPIP
+// Rate limited to 500 events/sec per source to avoid I/O saturation
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EtwEvent {
@@ -17,6 +19,38 @@ pub struct EtwEvent {
 #[derive(Debug)]
 pub struct EtwAdapter {
     available: bool,
+    rate_limiter: RateLimiter,
+}
+
+#[derive(Debug)]
+struct RateLimiter {
+    max_per_sec: u32,
+    last_reset: Instant,
+    count: u32,
+}
+
+impl RateLimiter {
+    fn new(max_per_sec: u32) -> Self {
+        Self {
+            max_per_sec,
+            last_reset: Instant::now(),
+            count: 0,
+        }
+    }
+
+    fn allow(&mut self) -> bool {
+        let elapsed = self.last_reset.elapsed();
+        if elapsed >= Duration::from_secs(1) {
+            self.last_reset = Instant::now();
+            self.count = 0;
+        }
+        if self.count < self.max_per_sec {
+            self.count += 1;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl Default for EtwAdapter {
@@ -29,15 +63,23 @@ impl EtwAdapter {
     pub fn new() -> Self {
         // ETW only available on Windows with elevation
         #[cfg(target_os = "windows")]
-        let available = true;
+        let available = cfg!(feature = "windows_etw");
         #[cfg(not(target_os = "windows"))]
         let available = false;
 
-        Self { available }
+        Self {
+            available,
+            rate_limiter: RateLimiter::new(500), // 500 events/sec per source
+        }
     }
 
     pub fn is_available(&self) -> bool {
         self.available && cfg!(feature = "windows_etw")
+    }
+
+    /// Check if event should be processed (rate limiting)
+    pub fn allow_event(&mut self) -> bool {
+        self.rate_limiter.allow()
     }
 
     /// Convert ETW event to canonical core::Event

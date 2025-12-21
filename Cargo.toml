@@ -28,8 +28,10 @@ ebpf = []
 with-ebpf = []
 with-ebpf-load = []
 gnn = []  # GNN hooks and graph infrastructure (disabled by default)
+windows_etw = []  # Windows ETW collection (requires elevation; disabled by default)
 forensic = []  # Advanced endpoint forensics (ebpf, modules, file/process monitoring)
 advanced_scoring = []  # Optional scoring pipelines (yara, elastic, ecs, explain)
+windows_etw = []  # Windows ETW collection (requires elevation; disabled by default)
 
 [dependencies]
 # --- web / http ---
