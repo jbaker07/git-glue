@@ -46,6 +46,11 @@ pub mod playbook_loader;
 pub mod scoring;
 pub mod signal_persistence;
 
+// Slot matcher: playbook slot matching engine
+pub mod slot_matcher;
+#[cfg(test)]
+mod slot_matcher_tests;
+
 // Evidence system with path safety (Ship Hardening)
 pub mod evidence;
 
@@ -84,6 +89,12 @@ pub use scoring::{ScoredSignal, ScoringEngine};
 // Re-export hypothesis controller
 pub use hypothesis_controller::HypothesisController;
 
+// Re-export slot matcher types
+pub use slot_matcher::{
+    CapabilityLevel, CapabilityRegistry, PlaybookDef, PlaybookIndex, PlaybookSlot, 
+    SlotMatcher, SlotPredicate,
+};
+
 // Re-export hypothesis types for incident compiler
 pub use hypothesis::{
     // Arbitration and explanation
@@ -102,6 +113,7 @@ pub use hypothesis::{
     ExplanationBuilder,
     ExplanationResponse,
     Fact,
+    FactDomain,
     FactStore,
     FactType,
     // Determinism
@@ -121,6 +133,7 @@ pub use hypothesis::{
     RankedHypothesis,
     ScopeKey,
     Slot,
+    SlotRequirement,
     SuppressedHypothesis,
     SuppressionReason,
     TimelineEntry,
