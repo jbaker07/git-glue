@@ -712,6 +712,183 @@ pub fn integration_api_router(state: IntegrationApiState) -> Router {
         .with_state(state)
 }
 
+// ============================================================================
+// Bridge Handlers (for integration into main router)
+// These handlers create their own state internally for use with AppState
+// ============================================================================
+
+/// Bridge handler for list_integrations that creates its own state
+pub async fn list_integrations_bridge(
+    Query(query): Query<ListIntegrationsQuery>,
+) -> impl IntoResponse {
+    let state = IntegrationApiState::demo();
+    let profiles = state.profiles.read().unwrap();
+
+    let mut result: Vec<IntegrationProfileApi> = profiles
+        .values()
+        .filter(|p| {
+            // Filter by mode if specified
+            if let Some(ref mode_str) = query.mode {
+                let mode_match = match mode_str.as_str() {
+                    "export" => p.summary.mode == IntegrationMode::Export,
+                    "ingest" => p.summary.mode == IntegrationMode::Ingest,
+                    "both" => p.summary.mode == IntegrationMode::Both,
+                    _ => true,
+                };
+                if !mode_match {
+                    return false;
+                }
+            }
+
+            // Filter by enabled if specified
+            if let Some(enabled_only) = query.enabled_only {
+                if enabled_only && !p.summary.enabled {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .map(|p| p.summary.clone())
+        .collect();
+
+    // Sort by name
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Json(serde_json::json!({
+        "integrations": result,
+        "total": result.len()
+    }))
+}
+
+/// Bridge handler for get_integration that creates its own state
+pub async fn get_integration_bridge(
+    Path(integration_id): Path<String>,
+) -> impl IntoResponse {
+    let state = IntegrationApiState::demo();
+    let profiles = state.profiles.read().unwrap();
+
+    match profiles.get(&integration_id) {
+        Some(profile) => Json(serde_json::json!({
+            "integration": profile
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "Integration not found",
+                "integration_id": integration_id
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// Bridge handler for get_capabilities that creates its own state
+pub async fn get_capabilities_bridge(
+    Query(query): Query<CapabilitiesQuery>,
+) -> impl IntoResponse {
+    let state = IntegrationApiState::demo();
+    let profiles = state.profiles.read().unwrap();
+    let collectors = state.collectors.read().unwrap();
+
+    let mut sources = Vec::new();
+    let mut fact_support: HashMap<String, HashMap<String, Fidelity>> = HashMap::new();
+    let mut join_key_support: HashMap<String, HashMap<String, bool>> = HashMap::new();
+
+    // Add collectors if requested (default: true)
+    let include_collectors = query.include_collectors.unwrap_or(true);
+    if include_collectors {
+        for collector in collectors.iter() {
+            sources.push(CapabilitySource {
+                id: collector.id.clone(),
+                name: collector.name.clone(),
+                source_type: SourceType::Collector,
+                mode: IntegrationMode::Ingest,
+                health_status: collector.health_status,
+            });
+
+            // Add fact support (Hard for collectors)
+            for fact_type in &collector.facts_supported {
+                let entry = fact_support
+                    .entry(fact_type.clone())
+                    .or_insert_with(HashMap::new);
+                entry.insert(collector.id.clone(), Fidelity::Hard);
+            }
+
+            // Add join key support
+            merge_join_keys(
+                &mut join_key_support,
+                &collector.id,
+                &collector.join_keys_supported,
+            );
+        }
+    }
+
+    // Add integrations
+    for (id, profile) in profiles.iter() {
+        if !profile.summary.enabled {
+            continue;
+        }
+
+        sources.push(CapabilitySource {
+            id: id.clone(),
+            name: profile.summary.name.clone(),
+            source_type: SourceType::Integration,
+            mode: profile.summary.mode,
+            health_status: profile.summary.health_status,
+        });
+
+        // Add fact support
+        for (fact_type, fidelity) in &profile.facts_supported {
+            let entry = fact_support
+                .entry(fact_type.clone())
+                .or_insert_with(HashMap::new);
+            entry.insert(id.clone(), *fidelity);
+        }
+
+        // Add join key support
+        merge_join_keys(&mut join_key_support, id, &profile.join_keys_supported);
+    }
+
+    Json(CapabilitiesMatrixApi {
+        sources,
+        fact_support,
+        join_key_support,
+        host_id: query.host_id,
+        namespace: query.namespace,
+    })
+}
+
+/// Bridge handler for get_samples that creates its own state
+pub async fn get_samples_bridge(
+    Path(integration_id): Path<String>,
+    Query(query): Query<SampleQuery>,
+) -> impl IntoResponse {
+    let state = IntegrationApiState::demo();
+    let samples = state.samples.read().unwrap();
+
+    match samples.get(&integration_id) {
+        Some(events) => {
+            let limited: Vec<_> = events.iter().rev().take(query.limit).cloned().collect();
+            Json(SampleEventsResponse {
+                integration_id,
+                samples: limited,
+                total_available: events.len(),
+            })
+            .into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "Integration not found or no samples available",
+                "integration_id": integration_id
+            })),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

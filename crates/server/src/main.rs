@@ -1806,9 +1806,12 @@ async fn main() {
             "/api/visibility/throttle/reset",
             post(reset_throttle_counters),
         )
-        // Integration API endpoints (nested with separate state)
-        // TODO: Merge IntegrationApiState with AppState for unified router
-        // .nest("", integration_api::integration_api_router(integration_state))
+        // Integration API endpoints (mounted separately due to different state)
+        // These endpoints provide integration metadata and capabilities
+        .route("/api/integrations", get(integration_api::list_integrations_bridge))
+        .route("/api/integrations/:id", get(integration_api::get_integration_bridge))
+        .route("/api/integrations/:id/sample", get(integration_api::get_samples_bridge))
+        .route("/api/capabilities", get(integration_api::get_capabilities_bridge))
         // Static files
         .nest_service("/ui", ServeDir::new(&ui_dir))
         .layer(cors)

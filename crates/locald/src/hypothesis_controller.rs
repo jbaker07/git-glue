@@ -12,9 +12,12 @@ use crate::hypothesis::{
     HypothesisState, HypothesisStorage, InMemoryStorage, IncidentStore, LateArrivalAction,
     LateArrivalPolicy, QueryContext, ScopeKey, SessionMode, StreamWatermark,
 };
+use crate::integrations::export::IncidentExporter;
+use crate::integrations::config::ExportSinkConfig;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::path::PathBuf;
 
 /// HypothesisController owns the hypothesis system runtime state
 pub struct HypothesisController {
@@ -32,6 +35,10 @@ pub struct HypothesisController {
     late_arrival_policy: LateArrivalPolicy,
     /// Global watermark tracking per-stream watermarks
     global_watermark: GlobalWatermark,
+    /// Optional incident exporter for SIEM integration
+    exporter: Option<IncidentExporter>,
+    /// Export namespace for multi-tenant support
+    export_namespace: Option<String>,
 }
 
 impl HypothesisController {
@@ -45,6 +52,8 @@ impl HypothesisController {
             host_id: host_id.into(),
             late_arrival_policy: LateArrivalPolicy::default(),
             global_watermark: GlobalWatermark::new(),
+            exporter: None,
+            export_namespace: None,
         }
     }
 
@@ -58,7 +67,29 @@ impl HypothesisController {
             host_id: host_id.into(),
             late_arrival_policy: policy,
             global_watermark: GlobalWatermark::new(),
+            exporter: None,
+            export_namespace: None,
         }
+    }
+
+    /// Create with export configuration
+    pub fn with_exporter(
+        host_id: impl Into<String>,
+        export_config: ExportSinkConfig,
+        namespace: Option<String>,
+    ) -> Result<Self, String> {
+        let exporter = IncidentExporter::new(export_config)?;
+        Ok(Self {
+            storage: Arc::new(RwLock::new(InMemoryStorage::new())),
+            arbitration_engine: ArbitrationEngine::new(),
+            hypotheses: HashMap::new(),
+            incident_store: IncidentStore::new(),
+            host_id: host_id.into(),
+            late_arrival_policy: LateArrivalPolicy::default(),
+            global_watermark: GlobalWatermark::new(),
+            exporter: Some(exporter),
+            export_namespace: namespace,
+        })
     }
 
     /// Ingest a canonical event with late arrival checking
@@ -136,6 +167,18 @@ impl HypothesisController {
         let affected_hypothesis_ids = self.update_hypotheses_for_fact(&fact)?;
 
         Ok(affected_hypothesis_ids)
+    }
+
+    /// Ingest multiple facts (batch operation for third-party integration)
+    pub fn ingest_facts(&mut self, facts: Vec<Fact>) -> Result<Vec<String>, String> {
+        let mut all_affected = Vec::new();
+        for fact in facts {
+            match self.ingest_fact(fact) {
+                Ok(affected) => all_affected.extend(affected),
+                Err(e) => eprintln!("[hypothesis] Error ingesting fact: {}", e),
+            }
+        }
+        Ok(all_affected)
     }
 
     /// Update hypotheses based on a new fact
@@ -296,7 +339,7 @@ impl HypothesisController {
         hypothesis.promote(&incident_id);
 
         // Store incident
-        self.incident_store.upsert(incident);
+        self.incident_store.upsert(incident.clone());
 
         // Update hypothesis in storage
         {
@@ -304,6 +347,12 @@ impl HypothesisController {
             storage
                 .update_hypothesis(hypothesis)
                 .map_err(|e| e.to_string())?;
+        }
+
+        // Export incident if exporter is configured
+        if let Some(exporter) = &mut self.exporter {
+            exporter.export_batch(&[&incident], self.export_namespace.as_deref())
+                .map_err(|e| format!("Failed to export incident: {}", e))?;
         }
 
         Ok(incident_id)

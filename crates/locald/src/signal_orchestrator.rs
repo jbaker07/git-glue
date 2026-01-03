@@ -7,6 +7,7 @@ use crate::os::linux::LinuxSignalEngine;
 use crate::os::macos::MacOSSignalEngine;
 use crate::os::windows::WindowsSignalEngine;
 use crate::signal_result::SignalResult;
+use crate::integrations::ingest::VendorAlertIngester;
 use edr_core::Event;
 
 /// Platform type for signal routing
@@ -38,6 +39,8 @@ pub struct SignalOrchestrator {
     windows_engine: Option<WindowsSignalEngine>,
     macos_engine: Option<MacOSSignalEngine>,
     linux_engine: Option<LinuxSignalEngine>,
+    /// Optional vendor alert ingester for SIEM integration
+    ingester: Option<VendorAlertIngester>,
 }
 
 impl SignalOrchestrator {
@@ -54,18 +57,19 @@ impl SignalOrchestrator {
             windows_engine: None,
             macos_engine: None,
             linux_engine: None,
+            ingester: None,
         };
 
         // Initialize the appropriate engine
         match platform {
             Platform::Windows => {
-                orchestrator.windows_engine = Some(WindowsSignalEngine::new(host));
+                orchestrator.windows_engine = Some(WindowsSignalEngine::new(host.clone()));
             }
             Platform::MacOS => {
-                orchestrator.macos_engine = Some(MacOSSignalEngine::new(host));
+                orchestrator.macos_engine = Some(MacOSSignalEngine::new(host.clone()));
             }
             Platform::Linux => {
-                orchestrator.linux_engine = Some(LinuxSignalEngine::new(host));
+                orchestrator.linux_engine = Some(LinuxSignalEngine::new(host.clone()));
             }
         }
 
@@ -116,6 +120,25 @@ impl SignalOrchestrator {
     /// Get the hostname
     pub fn host(&self) -> &str {
         &self.host
+    }
+
+    /// Enable vendor alert ingestion
+    pub fn enable_ingester(&mut self) {
+        self.ingester = Some(VendorAlertIngester::new(&self.host));
+    }
+
+    /// Get ingester (if enabled)
+    pub fn ingester_mut(&mut self) -> Option<&mut VendorAlertIngester> {
+        self.ingester.as_mut()
+    }
+
+    /// Poll for vendor alerts (returns Facts for hypothesis pipeline)
+    pub fn poll_ingest(&mut self) -> Result<Vec<crate::hypothesis::Fact>, String> {
+        if let Some(ingester) = &mut self.ingester {
+            ingester.poll()
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 
