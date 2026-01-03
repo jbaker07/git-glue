@@ -948,7 +948,7 @@ fn macos_dedup_key(event: &edr_core::Event) -> Option<String> {
     ))
 }
 
-fn main() {
+pub fn main() {
     eprintln!("capture_macos_rotating: Production OpenBSM pipeline");
 
     // Check for --once flag (exit after first segment for testing)

@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "agent-linux"
 path = "src/main.rs"
 
+[[bin]]
+name = "capture_linux_rotating"
+path = "src/bin/capture_linux_rotating.rs"
+
 [dependencies]
 edr-core = { path = "../core" }
 serde = { version = "1.0", features = ["derive"] }
@@ -25,6 +29,7 @@ anyhow = "1"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
 libc = "0.2"
+ctrlc = "3.4"
 
 # Linux specific
 [target.'cfg(target_os = "linux")'.dependencies]

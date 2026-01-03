@@ -4,9 +4,17 @@ version = "0.1.0"
 edition = "2021"
 description = "macOS capture agent using BSM/EndpointSecurity"
 
+[lib]
+name = "agent_macos"
+path = "src/lib.rs"
+
 [[bin]]
 name = "agent-macos"
 path = "src/main.rs"
+
+[[bin]]
+name = "capture_macos_rotating"
+path = "src/bin/capture_macos_rotating.rs"
 
 [dependencies]
 edr-core = { path = "../core" }

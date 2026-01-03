@@ -79,7 +79,7 @@ pub use arbitration::{
 pub use canonical_event::{
     CanonicalEvent, EvidencePtr, FileContext, NetworkContext, ProcessContext,
 };
-pub use canonical_fact::{Fact, FactStore, FactType};
+pub use canonical_fact::{Fact, FactDomain, FactStore, FactType};
 pub use command_alignment::{CommandAlignmentResult, CommandCategory, CommandEvent};
 pub use copilot::{CopilotAnswer, CopilotRequest, CopilotService, DefaultCopilot, OutputFormat};
 pub use disambiguator::{generate_disambiguators, Disambiguator, PivotAction};
@@ -87,7 +87,7 @@ pub use explanation::{
     Claim, ClaimCertainty, ExplanationBuilder, ExplanationResponse, ExplanationVisibilityState,
     QueryContext,
 };
-pub use hypothesis_state::{HypothesisState, HypothesisStatus, Slot, SlotFill};
+pub use hypothesis_state::{HypothesisState, HypothesisStatus, Slot, SlotFill, SlotRequirement};
 pub use incident::{Incident, IncidentStatus, IncidentStore, TimelineEntry, TimelineEntryKind};
 pub use promotion::{
     calculate_confidence, calculate_maturity, check_promotion, PromotionDecision, Severity,
