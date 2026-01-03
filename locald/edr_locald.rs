@@ -2,6 +2,10 @@ use forensic_hooks::services::playbook_engine::{load_playbooks_from_dir, Playboo
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use super::os::windows::signal_engine::WindowsSignalEngine;
+use super::scoring::{ScoringEngine, ScoredSignal};
+use super::hypothesis::ordering::{LateArrivalGate, LateArrivalAction};
+use chrono::{DateTime, Utc, TimeZone};
 /// edr_locald: macOS threat detection daemon
 ///
 /// Complete end-to-end pipeline:
@@ -1660,6 +1664,9 @@ fn ingest_segment(
     accumulated_facts: &mut Vec<(Fact, EvidencePtr)>,
     playbook_engine: &mut PlaybookEngine,
     metrics: &mut MetricsCollector,
+    windows_signal_engine: &mut WindowsSignalEngine,
+    scoring_engine: &ScoringEngine,
+    late_arrival_gate: &mut LateArrivalGate,
 ) -> std::io::Result<()> {
     eprintln!(
         "  [ingest] Processing segment: {} (stream: {})",
@@ -1729,7 +1736,59 @@ fn ingest_segment(
                     .unwrap_or(0)
             });
 
+        // === Late Arrival Gate (D Production Invariant) ===
+        // Check and enforce late arrival policy BEFORE storing event
+        let event_ts_utc = Utc.timestamp_millis_opt(ts as i64).single().unwrap_or_else(Utc::now);
+        let (late_action, is_late_arrival) = late_arrival_gate.check_and_update(
+            stream_id,
+            segment_id,
+            record_index as u64,
+            event_ts_utc,
+        );
+
+        // Record audit for rejected/late events to SQLite
+        if matches!(late_action, LateArrivalAction::Reject | LateArrivalAction::LateEnrichmentOnly) {
+            if let Ok(db_conn) = db.lock() {
+                let action_str = match late_action {
+                    LateArrivalAction::Reject => "Reject",
+                    LateArrivalAction::LateEnrichmentOnly => "LateEnrichmentOnly",
+                    _ => "Unknown",
+                };
+                let watermark_high_ms = late_arrival_gate.watermark.global_high.timestamp_millis();
+                let lateness_ms = watermark_high_ms - (ts as i64);
+                let now_ms = Utc::now().timestamp_millis();
+                let _ = db_conn.execute(
+                    "INSERT OR IGNORE INTO late_arrival_audit (stream_id, segment_id, record_index, event_ts, watermark_high, lateness_ms, max_age_ms, action, decision_ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        stream_id,
+                        segment_id,
+                        record_index as i32,
+                        ts as i64,
+                        watermark_high_ms,
+                        lateness_ms,
+                        86400000i64, // 24h default max_event_age
+                        action_str,
+                        now_ms
+                    ],
+                );
+            }
+        }
+
+        // Skip rejected events entirely
+        if late_action == LateArrivalAction::Reject {
+            metrics.record_event(); // Still count for metrics
+            if let Ok(db_conn) = db.lock() {
+                let _ = db_conn.execute(
+                    "INSERT INTO metrics_rollup (ts_bucket, metric_name, count) VALUES (?1, ?2, ?3) ON CONFLICT(ts_bucket, metric_name) DO UPDATE SET count=count+?3",
+                    params![(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() / 3600) as i64, "events_rejected_late", 1],
+                );
+            }
+            continue; // CRITICAL: Skip INSERT for rejected events
+        }
+        // === End Late Arrival Gate ===
+
         // Insert raw event to DB - idempotent via UNIQUE constraint
+        // Note: is_late_arrival flag is available for downstream annotation
         if let Ok(db_conn) = db.lock() {
             let event_json = serde_json::to_string(&event_data.data).unwrap_or_default();
             let _ = db_conn.execute(
@@ -1739,6 +1798,14 @@ fn ingest_segment(
                 );
             event_count += 1;
             metrics.record_event();
+            
+            // Record late enrichment metric if applicable
+            if is_late_arrival {
+                let _ = db_conn.execute(
+                    "INSERT INTO metrics_rollup (ts_bucket, metric_name, count) VALUES (?1, ?2, ?3) ON CONFLICT(ts_bucket, metric_name) DO UPDATE SET count=count+?3",
+                    params![(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() / 3600) as i64, "events_late_enrichment", 1],
+                );
+            }
         }
 
         // Extract facts
@@ -1772,6 +1839,48 @@ fn ingest_segment(
         let signals =
             signal_state.emit_signals(&event_data.event_type, host, user, exe, path, dest_ip, ts, stream_id);
         
+        // === Windows Signal Processing ===
+        // If Windows signal detection is enabled, process through WindowsSignalEngine
+        if stream_id == "windows" || event_data.event_type.contains("Windows") {
+            // Build canonical Event for Windows signal processing
+            let canonical_event = forensic_hooks::Event {
+                ts_ms: ts as i64,
+                host: host.to_string(),
+                tags: event_data.data.get("tags")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+                    .unwrap_or_else(|| vec![event_data.event_type.clone()]),
+                proc_key: None,
+                file_key: None,
+                identity_key: Some(user.to_string()),
+                evidence_ptr: forensic_hooks::EvidencePtr {
+                    stream_id: stream_id.to_string(),
+                    segment_id: segment_id.parse::<u64>().unwrap_or(0),
+                    record_index: record_index as u32,
+                },
+                fields: event_data.data.clone().as_object().cloned().unwrap_or_default(),
+            };
+
+            // Process event through Windows signal engine
+            let win_signals = windows_signal_engine.process_event(&canonical_event);
+            
+            // Score and persist Windows signals
+            let mut scored_signals = Vec::new();
+            for win_signal in win_signals {
+                let scored = scoring_engine.score(win_signal);
+                scored_signals.push(scored);
+            }
+
+            // Persist scored signals (for now just log them)
+            for scored_signal in &scored_signals {
+                eprintln!(
+                    "[windows_signal] {} (risk={:.2}): {}",
+                    scored_signal.signal.signal_type, scored_signal.risk_score, scored_signal.signal.host
+                );
+            }
+        }
+        // === End Windows Signal Processing ===
+        
         // Record coverage for this event
         record_coverage_rollup(&db_conn, host, "BSM", Some(&event_data.event_type), None, "proc_exec,file_ops,netconnect");
         
@@ -1799,7 +1908,10 @@ fn ingest_segment(
         }
 
         // Only process playbooks if this record hasn't been processed before
-        if should_process_playbook {
+        // AND the event is not a LateEnrichmentOnly event (those only enrich, not drive detection)
+        let should_drive_detection = should_process_playbook && late_action != LateArrivalAction::LateEnrichmentOnly;
+        
+        if should_drive_detection {
             for fact in &facts {
                 let ptr = EvidencePtr {
                     segment_id: segment_id.to_string(),
@@ -2292,7 +2404,22 @@ fn main() {
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(ts_minute, host, sensor_mode, fact_type, signal_type)
                 );
-                CREATE INDEX IF NOT EXISTS idx_coverage_ts ON coverage_rollup(ts_minute DESC);",
+                CREATE INDEX IF NOT EXISTS idx_coverage_ts ON coverage_rollup(ts_minute DESC);
+                CREATE TABLE IF NOT EXISTS late_arrival_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stream_id TEXT NOT NULL,
+                    segment_id TEXT NOT NULL,
+                    record_index INTEGER NOT NULL,
+                    event_ts INTEGER NOT NULL,
+                    watermark_high INTEGER NOT NULL,
+                    lateness_ms INTEGER NOT NULL,
+                    max_age_ms INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    decision_ts INTEGER NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(stream_id, segment_id, record_index)
+                );
+                CREATE INDEX IF NOT EXISTS idx_late_arrival_ts ON late_arrival_audit(decision_ts DESC);",
             );
             Arc::new(Mutex::new(conn))
         }
@@ -2336,6 +2463,23 @@ fn main() {
     let mut last_ttl_cleanup = std::time::SystemTime::now();
     let mut last_retention_run = std::time::SystemTime::now();
     let mut signal_state = signal_engine::SignalState::new();
+    
+    // Initialize Late Arrival Gate (single ingestion gate for watermark enforcement)
+    let mut late_arrival_gate = LateArrivalGate::new();
+    eprintln!("[locald] Late arrival gate initialized (max_event_age=24h, grace_period=30s)");
+    
+    // Initialize Windows signal detector
+    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
+    let mut windows_signal_engine = WindowsSignalEngine::new(hostname.clone());
+    
+    // Initialize scoring engine (enabled via feature flag or env var)
+    let enable_advanced_scoring = cfg!(feature = "advanced_scoring") || 
+                                   std::env::var("EDR_ADVANCED_SCORING").is_ok();
+    let scoring_engine = ScoringEngine::new(enable_advanced_scoring);
+    if enable_advanced_scoring {
+        eprintln!("[locald] Advanced scoring enabled (Mahalanobis + EllipticEnvelope + KRIM)");
+    }
+
 
     // Setup graceful shutdown
     let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -2430,6 +2574,9 @@ fn main() {
                             &mut accumulated_facts,
                             &mut playbook_engine,
                             &mut metrics,
+                            &mut windows_signal_engine,
+                            &scoring_engine,
+                            &mut late_arrival_gate,
                         ) {
                             eprintln!(
                                 "ERROR: Failed to ingest {} from stream {}: {}",

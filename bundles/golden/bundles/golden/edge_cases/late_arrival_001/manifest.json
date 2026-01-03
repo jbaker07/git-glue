@@ -1,0 +1,21 @@
+{
+  "version": "1.0.0",
+  "bundle_meta": {
+    "bundle_id": "golden-edge_cases-late_arrival_001",
+    "exported_at": "2025-01-01T00:00:00Z",
+    "exported_by": "golden-gen",
+    "redacted": false,
+    "hash_alg": "sha256",
+    "checksum": "03fa0b6bb851347a0dbe7c9c1fb11eb6d7f0a5dda8273b9db43adc87bf09a814",
+    "checksum_scope": "bundle_payload_sans_checksum"
+  },
+  "included_sections": {
+    "replay": true,
+    "recompute": true
+  },
+  "file_hashes": {
+    "recompute/config_snapshot.json": "6c0c54f2eb93ba3be49b0bcff2613122a08e0d6380af42e49d28b3b1c1441285",
+    "recompute/events.jsonl": "cf12f1d7a0135b65928a8b84464bd1cea3d8b14c5e05133d8cc1693d08af72cb",
+    "replay/report_bundle.json": "5e1bdf5e05f0c20ebcfbf43b28616c5db13933900f6c120910ba9b9a73f72de6"
+  }
+}

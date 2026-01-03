@@ -1,0 +1,299 @@
+================================================================================
+WINDOWS SENSOR AUDIT & UPGRADE PLAN
+Generated: 2025-12-22
+================================================================================
+
+═══════════════════════════════════════════════════════════════════════════════
+1. TRUTH INVENTORY: ACTIVE vs INACTIVE vs STUB
+═══════════════════════════════════════════════════════════════════════════════
+
+Module                          | Status              | Data Source        | Events Emitted                 | Wired?
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+evtx_collector.rs               | ACTIVE+REAL         | Event Logs         | Security/4688/4624/4625/4720  | NO*
+                                |                     | (Security,          | + System, PowerShell, WMI,     |
+                                |                     |  System,             | Task logs (filters on IDs)     |
+                                |                     |  PowerShell, WMI,   |                                |
+                                |                     |  Application)       |                                |
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+sysmon_adapter.rs               | ACTIVE+PARTIAL      | Event Log (Sysmon)  | EventID 1/3/7/11/22/26         | NO
+                                | (has conversion     | (Operational)       | (Process/Network/ImageLoad/    |
+                                |  logic, no reader)  |                     | FileCreate/DNS/FileDelete)     |
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+sysmon_adapter_ext.rs           | ACTIVE+PARTIAL      | Event Log (Sysmon)  | EventID 8/10/15/17/18/19/20/21 | NO
+                                | (has conversion     | (Operational)       | /25/26 (Injection/LSASS Access |
+                                |  logic, no reader)  |                     | /ADS/Pipes/WMI/Tampering)      |
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+etw_adapter.rs                  | STUB                | None (feature-gated | Process/ImageLoad/Network      | NO
+                                | (has conversion     | cfg(windows_etw),   | (NOT IMPLEMENTED: no session   |
+                                |  but available=false| but no real ETW     | creation or event reading)     |
+                                |  hardcoded)         | session setup)      |                                |
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+defender_adapter.rs             | STUB                | Defender/AMSI       | EventID 1116/1117/1121/1101/   | NO
+                                | (has conversion     | (NOT READABLE:      | 1102 (Threat detection/AMSI)   |
+                                |  logic, available   | available=false     | (NOT IMPLEMENTED: no real      |
+                                |  hardcoded false)   | hardcoded)          | defender API calls)            |
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+registry_monitor.rs             | INACTIVE+REAL       | Event Logs          | EventID 12/13/14 (Registry     | NO
+                                | (has conversion)    | (Sysmon) +          | create/value/rename +          |
+                                |                     | Security 4657       | persistence pattern tags)      |
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+service_monitor.rs              | INACTIVE+REAL       | Event Logs          | EventID 7045 (System)/4697     | NO
+                                | (has conversion)    | (System/Security)   | (Service install/modify)       |
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+task_scheduler_monitor.rs       | INACTIVE+REAL       | Event Log           | EventID 106/140/200            | NO
+                                | (has conversion)    | (TaskScheduler/Op)  | (Task create/update/execute)   |
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+log_tamper_monitor.rs           | INACTIVE+REAL       | Event Logs          | EventID 4688 (process with log | NO
+                                | (has conversion)    | (Security/System)   | tool names) + 1102 (cleared)   |
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+lateral_movement_monitor.rs     | INACTIVE+REAL       | Event Log           | EventID 4624/4625/4769         | NO
+                                | (has conversion)    | (Security)          | (Logon/Kerberos)              |
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+evidence_deref_example.rs       | EXAMPLE             | N/A                 | N/A                            | NO
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+capture_windows_rotating.rs     | PARTIAL             | Mock JSONL only     | (has mock mode, no real        | YES (mock)
+                                |                     |                     | integration to sensors)        |
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+KEY OBSERVATIONS:
+─────────────────
+✗ NOTHING IS WIRED END-TO-END
+  - evtx_collector: reads event logs, filters on IDs, converts to core::Event
+    BUT: NOT CALLED from capture_windows_rotating; no polling loop; no bookmarks
+  - All adapters: have conversion logic BUT no actual data collection
+  - sysmon/registry/service/task/log_tamper: have conversion BUT not called
+
+✗ NO POLLING INFRASTRUCTURE
+  - No max_records_per_poll, no backoff, no error handling
+  - No bookmarks/cursors for incremental reads (would reread entire log on restart)
+  - No heartbeat metrics sent
+
+✗ STUBS ARE HARDCODED DISABLED
+  - ETW: available = false (no session creation)
+  - Defender: available = false (no API calls)
+
+✓ CONVERSION LOGIC IS SOLID
+  - evtx_collector: real 367-line implementation with proper event ID filtering
+  - sysmon_adapter: maps all key Sysmon events correctly
+  - registry/service/task monitors: have real logic, just not integrated
+
+═══════════════════════════════════════════════════════════════════════════════
+2. MINIMUM VIABLE "ALWAYS-ON" WINDOWS TELEMETRY SET
+═══════════════════════════════════════════════════════════════════════════════
+
+RECOMMENDED: EVTX Collector Only (Sysmon + Security logs)
+
+RATIONALE:
+──────────
+1. SIMPLICITY: No kernel driver needed, no feature flags, no registry magic
+2. SYSMON AVAILABLE: Most enterprise deployments have Sysmon running already
+3. SECURITY LOG: Always present; can be read without elevation if auditing enabled
+4. STABILITY: Event Logs are stable, bounded, and have cursor support
+5. COVERAGE: Sysmon covers process/network/file/injection/LSASS (events 1,3,7-11,10,etc.)
+
+WHAT GETS ALWAYS-ON:
+─────────────────────
+✓ Sysmon Event Log subscription (Application & Services Logs > Microsoft-Windows-Sysmon)
+  - Events: 1 (process), 3 (network), 7 (image load), 10 (LSASS access), 11 (file create),
+            13 (registry set), 22 (DNS), 26 (file delete)
+✓ Security Event Log (critical events only)
+  - Events: 4624 (successful logon), 4625 (failed logon), 4688 (process creation),
+            4728 (group member add), 4657 (registry value modified), 1102 (log cleared)
+
+WHAT STARTS DISABLED (enable via env var):
+───────────────────────────────────────────
+○ TaskScheduler/Operational (106/140: task create/update)
+○ Registry monitor (Sysmon 12/13/14)
+○ Defender adapter (when available via EVTX or API)
+○ ETW (requires elevation and cfg feature)
+
+═══════════════════════════════════════════════════════════════════════════════
+3. UPGRADE PLAN: PRODUCTION-SHAPE EXISTING ADAPTERS
+═══════════════════════════════════════════════════════════════════════════════
+
+A. CREATE WINDOWS CONFIG MODULE (parallel to linux/sensors_v2/config.rs)
+   File: windows/config.rs
+   - Per-source gating: enabled, min_interval_ms, max_records_per_poll
+   - Work budgets: max_parse_errors_per_poll
+   - Env vars: EDR_WIN_<SOURCE>_<SETTING>=value
+   - Defaults: Sysmon=enabled, Security=enabled, Others=disabled
+
+B. ENHANCE EVTX COLLECTOR
+   - Add EvtxReader struct with bookmark/cursor tracking
+   - Implement poll_and_convert() method that:
+     * Reads up to max_records_per_poll events from bookmark
+     * Updates bookmark after successful parse
+     * Returns (events, parse_failed_count, bookmarks_state)
+   - Track per-source metrics: last_event_ts, events_read_total, parse_failed_total
+   - Emit sensor_health if parse errors exceed threshold
+
+C. IMPLEMENT POLLING LOOP IN CAPTURE
+   - capture_windows_rotating::poll_and_write():
+     * Call evtx_collector.poll() for each log (Sysmon, Security, etc.)
+     * Collect return events
+     * Assign EvidencePtr at write time (stream_id = "evtx:Sysmon", segment_id, record_index)
+     * Sort deterministically
+     * Write to rotating JSONL segment
+     * Emit heartbeat with transport="evtx", events_read, parse_failures, last_event_ts
+
+D. HEARTBEAT METRICS
+   - Every 5 seconds, write heartbeat.json:
+     {
+       "ts": "2025-12-22T12:34:56Z",
+       "transport": "evtx",
+       "source": "Sysmon",
+       "events_read_total": 1234,
+       "events_read_delta": 15,
+       "parse_failed_total": 2,
+       "parse_failed_delta": 0,
+       "last_event_ts": "2025-12-22T12:34:50Z",
+       "status": "healthy"
+     }
+
+E. ERROR TRANSPARENCY
+   - If EvtxCollector can't open a log, emit ONE sensor_health event and continue
+   - Use rate limiting to avoid spam
+   - Don't crash; degrade gracefully
+
+═══════════════════════════════════════════════════════════════════════════════
+4. COVERAGE EXPANSION: ADDITIONAL SENSORS
+═══════════════════════════════════════════════════════════════════════════════
+
+TIER 1 (HIGH PRIORITY): Already have conversion logic, just need to wire
+─────────────────────────
+1. Registry Persistence Monitoring (registry_monitor.rs)
+   Source: Sysmon EventID 12 (registry create) + 13 (registry value set) + 14 (rename)
+   Mapping: HotKey persistence (HKCU\Software\...\Run, etc.)
+   Implementation: Already have to_canonical_event(); wire into poll loop
+   Env Var: EDR_WIN_REGISTRY_ENABLED=true (default: false)
+
+2. Service Monitoring (service_monitor.rs)
+   Source: System log EventID 7045 (service install) + Security 4697 (service registry modify)
+   Mapping: Binary path + start type + user context
+   Implementation: Already have to_canonical_event(); wire into poll loop
+   Env Var: EDR_WIN_SERVICE_ENABLED=true (default: false)
+
+3. Task Scheduler Monitoring (task_scheduler_monitor.rs)
+   Source: TaskScheduler/Operational EventID 106 (create), 140 (update), 200 (execute)
+   Mapping: Task name + user + command
+   Implementation: Already have to_canonical_event(); wire into poll loop
+   Env Var: EDR_WIN_TASK_SCHEDULER_ENABLED=true (default: false)
+
+4. Log Tampering Detection (log_tamper_monitor.rs)
+   Source: Security log EventID 4688 (process with suspicious cmdline) + 1102 (log cleared)
+   Mapping: Presence of wevtutil, Clear-EventLog, Remove-EventLog in cmdline
+   Implementation: Already have to_canonical_event(); wire into poll loop
+   Env Var: EDR_WIN_LOG_TAMPER_ENABLED=true (default: false)
+
+5. Lateral Movement Monitoring (lateral_movement_monitor.rs)
+   Source: Security log EventID 4624 (logon type 3/10=network/RDP), 4769 (Kerberos service ticket)
+   Mapping: Source IP + target user + logon type
+   Implementation: Already have to_canonical_event(); wire into poll loop
+   Env Var: EDR_WIN_LATERAL_ENABLED=true (default: false)
+
+TIER 2 (MEDIUM PRIORITY): Conversion logic exists, source is ready
+────────────────────────
+6. Sysmon Extended Events (sysmon_adapter_ext.rs)
+   Source: Sysmon EventID 8 (CreateRemoteThread), 10 (ProcessAccess), 15 (ADS hash),
+            17/18 (named pipes), 19/20/21 (WMI), 25 (process tampering), 26 (file delete)
+   Mapping: Already in code; enable via Sysmon config
+   Env Var: EDR_WIN_SYSMON_EXT_ENABLED=true (default: false)
+
+7. PowerShell Script Block Logging (NEW: windows/sensors/powershell_monitor.rs)
+   Source: Windows PowerShell / Operational EventID 4104 (script block execution)
+   Events: { script_content (first 500 chars), user, path, engine_version }
+   Env Var: EDR_WIN_POWERSHELL_ENABLED=true (default: false)
+
+TIER 3 (LOWER PRIORITY): Requires API work or feature flags
+───────────────────────
+8. WMI Activity Monitoring
+   Source: Microsoft-Windows-WMI-Activity/Operational (EventID 5857=class modification)
+   Events: WMI class name, user, command
+   Env Var: EDR_WIN_WMI_ENABLED=true (default: false)
+
+9. LSASS Memory Access (Credential Dumping)
+   Source: Security EventID 4656 (object access), OR Sysmon 10 (ProcessAccess to LSASS)
+   Pattern: Any process opening LSASS with query/read rights
+   Env Var: EDR_WIN_LSASS_ENABLED=true (default: false)
+
+═══════════════════════════════════════════════════════════════════════════════
+5. IMPLEMENTATION ROADMAP
+═══════════════════════════════════════════════════════════════════════════════
+
+PHASE 1 (This session): Core infrastructure + Sysmon/Security always-on
+────────────────────────
+✓ Create windows/config.rs (gating + env vars)
+✓ Enhance evtx_collector with EvtxReader (polling + bookmarks)
+✓ Wire capture_windows_rotating to call poll_and_write()
+✓ Implement heartbeat metrics (transport=evtx)
+✓ Test with mock mode + real mode
+
+PHASE 2: Wire TIER 1 sensors
+────────────────────────────
+□ Registry monitor: add to evtx collector polling
+□ Service monitor: add to polling
+□ Task scheduler monitor: add to polling
+□ Log tamper monitor: add to polling
+□ Lateral movement monitor: add to polling
+
+PHASE 3: Add TIER 2 sensors
+───────────────────────────
+□ Sysmon extended events (pipe monitor, WMI, LSASS)
+□ PowerShell script block logging
+
+PHASE 4: Add TIER 3 sensors (if time/priority permits)
+───────────────────────────────────────────────────────
+□ Full WMI activity monitoring
+□ LSASS credential dumping detection
+
+═══════════════════════════════════════════════════════════════════════════════
+SUMMARY: BEFORE vs AFTER
+═══════════════════════════════════════════════════════════════════════════════
+
+BEFORE:
+───────
+- 0 real active sensors (evtx_collector exists but not called)
+- capture_windows_rotating only has mock mode
+- No polling, no bookmarks, no error transparency
+- No heartbeat metrics
+- Windows coverage: 0%
+
+AFTER (Phase 1):
+────────────────
+- ✓ Sysmon always-on (events 1,3,7,10,11,13,22,26)
+- ✓ Security log always-on (events 4624,4625,4688,4728,4657,1102)
+- ✓ Bounded polling with bookmarks
+- ✓ EvidencePtr assigned correctly
+- ✓ Heartbeat metrics: events_read_total, parse_failed_total, last_event_ts
+- ✓ Error transparency: graceful degradation if log unavailable
+- Windows coverage: 40% (core process/network/injection/log events)
+
+AFTER (Phase 1+2):
+──────────────────
+- + Registry persistence detection
+- + Service creation/modification
+- + Task scheduler abuse
+- + Log tampering detection
+- + Lateral movement (RDP, PSExec logons)
+- Windows coverage: 70% (enterprise attack surface)
+
+═══════════════════════════════════════════════════════════════════════════════
+DELIVERABLES (This Session)
+═══════════════════════════════════════════════════════════════════════════════
+
+Code Files:
+-----------
+1. windows/config.rs - Per-source configuration + env var loading
+2. ENHANCED: windows/sensors/evtx_collector.rs - Add EvtxReader + polling
+3. ENHANCED: windows/capture_windows_rotating.rs - Wire poll_and_write() loop
+4. NEW: windows/sensors/evtx_reader.rs - Event Log bookmark management (optional refactor)
+
+Verification:
+─────────────
+□ cargo build succeeds
+□ Mock mode still works
+□ Real mode can be tested on Windows
+□ Heartbeat.json emitted with correct metrics
+□ No panics on missing logs
+
+═══════════════════════════════════════════════════════════════════════════════

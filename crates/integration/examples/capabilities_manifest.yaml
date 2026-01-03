@@ -1,0 +1,26 @@
+# Example Capabilities Manifest
+sources:
+  - EDR
+  - IdP
+  - NDR
+fidelity:
+  EDR:
+    - ProcessStart
+    - FileWrite
+    - NetConnect
+  IdP:
+    - AuthSuccess
+    - AuthFailure
+    - MFA
+  NDR:
+    - DNSQuery
+    - NetFlow
+    - JA3
+trust_level:
+  EDR: signed
+  IdP: raw
+  NDR: best-effort
+timeliness:
+  EDR: 30d
+  IdP: 90d
+  NDR: 7d

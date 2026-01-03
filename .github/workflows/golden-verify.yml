@@ -1,0 +1,76 @@
+name: Golden Bundle Verification
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  verify-golden-bundles:
+    name: Verify Golden Bundles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: stable
+          
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+            
+      - name: Generate golden bundles (if missing)
+        run: |
+          if [ ! -d "bundles/golden" ] || [ -z "$(ls -A bundles/golden 2>/dev/null)" ]; then
+            echo "Generating golden bundles..."
+            cargo run -p edr-server --bin golden-cli -- generate bundles/golden
+          fi
+          
+      - name: Verify golden bundles (strict mode)
+        run: |
+          cargo run -p edr-server --bin golden-cli -- verify --strict --json golden-verify-results.json bundles/golden
+          
+      - name: Upload verification results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golden-verify-results
+          path: golden-verify-results.json
+          retention-days: 30
+          
+      - name: Check verification passed
+        run: |
+          if grep -q '"overall_verdict":"FAIL"' golden-verify-results.json; then
+            echo "❌ Golden bundle verification FAILED"
+            cat golden-verify-results.json | jq '.results[] | select(.verdict == "FAIL")'
+            exit 1
+          fi
+          echo "✅ Golden bundle verification passed"
+
+  golden-bundle-unit-tests:
+    name: Golden Bundle Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: stable
+          
+      - name: Run golden bundle tests
+        run: cargo test -p edr-server golden_bundle --lib

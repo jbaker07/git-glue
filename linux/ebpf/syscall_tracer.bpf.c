@@ -1,81 +1,72 @@
-// syscall_tracer.bpf.c — CO-RE tracepoint hooks for high-signal syscalls.
-// Emits compact ringbuf events: { pid, syscall_id }.
-//
-// Build: clang -O2 -g -target bpf -D__TARGET_ARCH_arm64 \
-//        -I/usr/include/bpf -I. -I.. -I../include -I../../include \
-//        -c syscall_tracer.bpf.c -o syscall_tracer.bpf.o
+// ebpf/syscall_tracer.bpf.c
+// ON_DEMAND: tracepoint/syscalls hooks for high-signal syscalls
+// Gated by ondemand_enabled map: prog_id 1 = enabled
+// Low sampling: only ~1/10 events emitted (SAMPLE_RATE=10)
+// NOTE: edr_events.h already defines the LICENSE symbol; do not redefine here.
 
-#include "vmlinux.h"
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_tracing.h>
-#include <bpf/bpf_core_read.h>
+#if __has_include("include/edr_events.h")
+#  include "include/edr_events.h"
+#elif __has_include("../include/edr_events.h")
+#  include "../include/edr_events.h"
+#else
+#  include "edr_events.h"
+#endif
 
-char LICENSE[] SEC("license") = "Dual BSD/GPL";
+/* Verify canonical struct size (384 bytes) */
+_Static_assert(sizeof(struct edr_event) == 384, "struct edr_event must be 384 bytes");
 
-// ----- Ring buffer payload -----
-struct syscall_event {
-    __u32 pid;
-    __u32 syscall_id; // ctx->id as seen by the kernel (arch-specific)
-};
+#define SAMPLE_RATE 10  // Emit 1 in every 10 events
 
+/* Global sampling counter: incremented by each syscall, wrap around at SAMPLE_RATE */
 struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 1 << 24); // 16 MiB
-} events SEC(".maps");
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} sample_counter SEC(".maps");
 
-// Safe wrapper: reserve → fill → submit
-static __always_inline void emit_from_ctx(struct trace_event_raw_sys_enter *ctx)
-{
-    struct syscall_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        return;
-
-    __u64 tgid_pid = bpf_get_current_pid_tgid();
-    e->pid = (__u32)(tgid_pid >> 32);
-    e->syscall_id = (__u32)BPF_CORE_READ(ctx, id);
-
-    bpf_ringbuf_submit(e, 0);
+/* High-signal syscalls: exec, fork, memory, privilege, network */
+#define TP_ENTER_SYSCALL_ONDEMAND(syscall_name) \
+SEC("tracepoint/syscalls/sys_enter_" #syscall_name) \
+int tp_enter_##syscall_name(struct trace_event_raw_sys_enter *ctx) { \
+    __u32 zero = 0; \
+    __u8 *enabled = bpf_map_lookup_elem(&ondemand_enabled, &zero); \
+    if (!enabled || !(*enabled)) return 0; \
+    \
+    __u64 *counter = bpf_map_lookup_elem(&sample_counter, &zero); \
+    if (!counter) return 0; \
+    \
+    __sync_fetch_and_add(counter, 1); \
+    if ((*counter) % SAMPLE_RATE != 0) return 0; \
+    \
+    struct edr_event ev = {}; \
+    ev.type       = EVT_SYSCALL_TRACE; \
+    ev.syscall_id = (__u32)BPF_CORE_READ(ctx, id); \
+    ev.tgid       = edr_tgid(); \
+    ev.fd         = -1; \
+    edr_emit(&ev); \
+    return 0; \
 }
 
-// Define handlers for specific sys_enter tracepoints.
-// NOTE: Do NOT use BPF_PROG() here; it injects its own "ctx" and conflicts.
-#define TP_ENTER_SYSCALL(sysname)                                              \
-SEC("tracepoint/syscalls/sys_enter_" #sysname)                                 \
-int tp_enter_##sysname(struct trace_event_raw_sys_enter *ctx) {                \
-    emit_from_ctx(ctx);                                                        \
-    return 0;                                                                  \
-}
+// Process exec lineage
+TP_ENTER_SYSCALL_ONDEMAND(execve)
+TP_ENTER_SYSCALL_ONDEMAND(execveat)
 
-// ====== High-signal coverage ======
-//
-// Process / exec lineage:
-TP_ENTER_SYSCALL(execve)
-TP_ENTER_SYSCALL(execveat)
-TP_ENTER_SYSCALL(fork)
-TP_ENTER_SYSCALL(vfork)
-TP_ENTER_SYSCALL(clone)
+// Process creation
+TP_ENTER_SYSCALL_ONDEMAND(fork)
+TP_ENTER_SYSCALL_ONDEMAND(vfork)
+TP_ENTER_SYSCALL_ONDEMAND(clone)
 
-// Memory & WX transitions (paired with wx_exec eBPF for higher fidelity):
-TP_ENTER_SYSCALL(mmap)
-TP_ENTER_SYSCALL(mprotect)
+// Memory & code modification
+TP_ENTER_SYSCALL_ONDEMAND(mmap)
+TP_ENTER_SYSCALL_ONDEMAND(mprotect)
 
-// Privilege & policy relaxations:
-TP_ENTER_SYSCALL(setuid)
-TP_ENTER_SYSCALL(setreuid)
-TP_ENTER_SYSCALL(setresuid)
-TP_ENTER_SYSCALL(capset)
+// Privilege escalation
+TP_ENTER_SYSCALL_ONDEMAND(setuid)
+TP_ENTER_SYSCALL_ONDEMAND(setreuid)
+TP_ENTER_SYSCALL_ONDEMAND(setresuid)
+TP_ENTER_SYSCALL_ONDEMAND(capset)
 
-// Network initiation (beacon / C2)
-TP_ENTER_SYSCALL(connect)
-
-// Optional file system touchpoints (uncomment if you want file-change context here too)
-// TP_ENTER_SYSCALL(open)
-// TP_ENTER_SYSCALL(openat)
-// TP_ENTER_SYSCALL(unlink)
-// TP_ENTER_SYSCALL(rename)
-
-// You can add more as needed:
-// TP_ENTER_SYSCALL(prctl)
-// TP_ENTER_SYSCALL(ptrace)
-// TP_ENTER_SYSCALL(bpf)
+// Network communication
+TP_ENTER_SYSCALL_ONDEMAND(connect)
 

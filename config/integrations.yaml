@@ -1,0 +1,68 @@
+# Integration Configuration
+# Enable export and ingest adapters for SIEM/open-stack integration
+
+# ============================================================================
+# Export Configuration
+# Emit incidents (not raw telemetry) to external sinks
+# ============================================================================
+export:
+  enabled: true
+  sinks:
+    # Wazuh integration (file-based JSONL)
+    - sink_id: wazuh
+      sink_type: jsonl_file
+      output_path: /var/lib/edr/exports/wazuh
+      min_severity: medium     # Export medium, high, critical
+      include_tier0: true      # Always export Tier-0 invariants
+      max_timeline_entries: 20
+      max_evidence_pointers: 50
+      schema_version: "1.0"
+
+    # Elastic/OpenSearch integration (file-based, filebeat reads)
+    # - sink_id: elastic
+    #   sink_type: jsonl_file
+    #   output_path: /var/lib/edr/exports/elastic
+    #   min_severity: low
+    #   include_tier0: true
+
+# ============================================================================
+# Ingest Configuration
+# Accept third-party alerts/events for enrichment via soft joins
+# ============================================================================
+ingest:
+  enabled: true
+  sources:
+    # Wazuh alerts.json ingest
+    - source_id: wazuh_alerts
+      source_type: wazuh_alerts
+      input_path: /var/ossec/logs/alerts/alerts.json
+      vendor: wazuh
+      join_strategy: ip_time_window
+      join_window_seconds: 300   # 5 minute window for soft joins
+      poll_interval_ms: 1000
+
+    # Zeek/Suricata EVE JSON ingest (network enrichment)
+    - source_id: zeek_eve
+      source_type: zeek_eve
+      input_path: /var/log/zeek/current/conn.log
+      vendor: zeek
+      join_strategy: ip_time_window
+      join_window_seconds: 300
+      poll_interval_ms: 1000
+
+    # Generic JSONL file ingest
+    # - source_id: custom_alerts
+    #   source_type: jsonl_file
+    #   input_path: /var/log/custom/alerts.jsonl
+    #   vendor: custom
+    #   join_strategy: host_time_window
+    #   join_window_seconds: 600
+
+# ============================================================================
+# Metrics Configuration
+# Enable metrics collection for proof/quality tracking
+# ============================================================================
+metrics:
+  enabled: true
+  output_path: /var/lib/edr/metrics
+  per_incident_breakdown: false  # Set true for detailed per-incident EQS

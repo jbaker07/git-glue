@@ -11,7 +11,7 @@ mod evidence_first_proof {
         
         let event = crate::Event {
             ts: Utc::now(),
-            event_type: crate::event::EventType::Execve,
+            event_type: crate::core::event::EventType::Execve,
             pid: Some(1234),
             ppid: Some(1000),
             uid: Some(500),

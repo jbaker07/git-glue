@@ -1,0 +1,276 @@
+================================================================================
+WINDOWS CLEANUP CHECKLIST: "NOT SUCK" REQUIREMENTS
+December 22, 2025
+================================================================================
+
+GOAL: Windows goes from "conversion ready but not wired" to "REAL_ACTIVE: emit events end-to-end"
+
+═══════════════════════════════════════════════════════════════════════════════
+
+A) TRUTH TABLE (COMPLETE AUDIT)
+  ✓ DONE: windows/TRUTH_TABLE.txt created
+    - Every module classified: REAL_ACTIVE | REAL_INACTIVE | MOCK_ONLY | STUB | DEAD
+    - Data source documented for each
+    - Wiring status (yes/no)
+    - Exact missing APIs listed (not handwaving)
+    - 8 modules ready (conversion logic exists), 2 stubs, 1 example
+
+B) CHOOSE DEFAULT INGEST PATH + WHY
+  ✓ DONE: windows/INGEST_DECISION.txt created
+    - RECOMMENDED: WEVTAPI EvtSubscribe (primary)
+    - FALLBACK: EVTX polling (if low privilege)
+    - NOT RECOMMENDED: ETW (optional, not always-on)
+    - Rationale: stability, coverage, enterprise standard
+    - Implementation plan: 7 steps (EvtxReader, wiring, bookmarks, metrics, gating, etc.)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+C) CHECKLIST: MODULES TO BE REAL_ACTIVE AFTER IMPLEMENTATION
+════════════════════════════════════════════════════════════════════════════════
+
+PRIMARY (reads from Windows Event Log):
+  [ ] evtx_collector
+      Status now: REAL_INACTIVE (poll() is placeholder stub returning empty)
+      What to do: Implement poll() to call EvtxReader.poll() 
+      Result: REAL_ACTIVE (actually emits events)
+      Events: Security 4688, 4624, 4768, 4769, 4776, 4912, 1102, etc.
+
+SECONDARY (share data from evtx_collector, enrich/filter):
+  [ ] sysmon_adapter
+      Status now: REAL_INACTIVE (to_canonical_event exists, is_available=false, never called)
+      What to do: Wire into collect_all(), call for each Sysmon event from evtx_collector
+      Result: REAL_ACTIVE (emits process, network, injection, DNS events)
+      Events: Sysmon 1, 3, 7, 10, 11, 13, 22, 26
+
+  [ ] registry_monitor
+      Status now: REAL_INACTIVE (to_canonical_event exists, never called)
+      What to do: Wire into collect_all(), filter Sysmon 13/14 or Security 4657 for persistence patterns
+      Result: REAL_ACTIVE (emits registry changes, highlights persistence)
+      Events: HKCU\...\Run, Winlogon, IFEO, Services key modifications
+
+  [ ] service_monitor
+      Status now: REAL_INACTIVE (to_canonical_event exists, never called)
+      What to do: Wire into collect_all(), filter System 7045 or Security 4697
+      Result: REAL_ACTIVE (emits service creation/modification)
+      Events: Service install with binary path, user context
+
+  [ ] task_scheduler_monitor
+      Status now: REAL_INACTIVE (to_canonical_event exists, never called)
+      What to do: Wire into collect_all(), read TaskScheduler/Operational 106/140/200
+      Result: REAL_ACTIVE (emits task creation/update/execution)
+      Events: Task name, user, action command
+
+  [ ] log_tamper_monitor
+      Status now: REAL_INACTIVE (to_canonical_event exists, never called)
+      What to do: Wire into collect_all(), filter Security 1102/4912 and 4688 with log-tool cmdlines
+      Result: REAL_ACTIVE (emits log tampering attempts)
+      Events: wevtutil, Clear-EventLog, Remove-EventLog, powershell with SecurityLog
+
+  [ ] lateral_movement_monitor
+      Status now: REAL_INACTIVE (to_canonical_event exists, never called)
+      What to do: Wire into collect_all(), filter Security 4624 (logon type 3/10) and 4769
+      Result: REAL_ACTIVE (emits remote logons, Kerberos abuse)
+      Events: RDP logons, network logons, service ticket requests with non-localhost source
+
+EXTENDED (if Sysmon extended events configured):
+  [ ] sysmon_adapter_ext (OPTIONAL)
+      Status now: REAL_INACTIVE (to_canonical_event exists, is_available=false)
+      What to do: Wire if Sysmon 8/10/15/17/18/19/20/21/25/26 are seen
+      Result: REAL_INACTIVE (stays inactive unless Sysmon events appear; emit health event)
+      Events: (conditional) injection, LSASS, ADS, named pipes, WMI, tampering
+
+PERMANENTLY STUB (not required for always-on):
+  [ ] etw_adapter
+      Status now: STUB (available=false hardcoded, no session setup)
+      Stay as STUB because: ETW requires elevation + feature gate, not critical path
+      When: Only if specifically requested for low-overhead scenarios
+      Result: Remains STUB with one health event "not enabled"
+
+  [ ] defender_adapter
+      Status now: STUB (available=false hardcoded, no Defender API)
+      Stay as STUB because: Not all machines have Defender; optional detection
+      When: Only if Defender is confirmed present
+      Result: Remains STUB with health event "Defender unavailable"
+
+═══════════════════════════════════════════════════════════════════════════════
+
+D) WIRING CHECKLIST (HOW MODULES GET CALLED)
+═════════════════════════════════════════════════════════════════════════════════
+
+[ ] Create windows/sensors/evtx_reader.rs
+    - EvtxReader struct with EvtSubscribe() handling
+    - poll() method reading from subscription
+    - Error handling + metrics tracking
+    - Bookmark persistence
+
+[ ] Implement evtx_collector.poll()
+    - Call evtx_reader.poll()
+    - Iterate events, call to_canonical_event()
+    - Handle parse errors
+    - Return (events, parse_failed, last_ts)
+
+[ ] Create windows/sensors/collect_all(host, cfg) → Vec<Event>
+    - Call evtx_collector.poll()
+    - For each enabled monitor, if config::should_poll():
+      - Call monitor.collect(host) or monitor.process_events(events)
+      - Add events to accumulator
+    - Return sorted events
+
+[ ] Wire capture_windows_rotating.poll_and_write()
+    - Call collect_all()
+    - Assign EvidencePtr at write time
+    - Write JSONL segment
+    - Emit per-channel heartbeat
+
+[ ] Implement bookmark persistence
+    - Load bookmarks.json on startup
+    - Pass bookmark to EvtxReader
+    - Update bookmarks.json after successful poll
+    - Ensure file survives process restart
+
+[ ] Per-module gating in collect_all()
+    - For each module, check config::should_poll(module_name)
+    - If false, skip and continue
+    - If module is unimplemented stub: emit ONE rate-limited health event, return empty
+
+[ ] Enhanced heartbeat
+    - Per-channel metrics: events_read_total/delta, parse_failed, last_event_ts
+    - Status per channel: healthy | degraded | unavailable
+    - Report which channels are active vs disabled
+
+═══════════════════════════════════════════════════════════════════════════════
+
+E) QUALITY REQUIREMENTS
+═════════════════════════════════════════════════════════════════════════════════
+
+Each module that's REAL_ACTIVE must:
+  [ ] Actually call Windows APIs (not just have conversion logic)
+  [ ] Parse event XML correctly
+  [ ] Call to_canonical_event() to emit core::Event
+  [ ] Return structured fields (subject_user, pid, path, command_line, etc.)
+  [ ] Not crash on malformed events (return None from to_canonical)
+  [ ] Respect max_events_per_poll cap
+  [ ] Update metrics (events_read, parse_failed)
+  [ ] Support per-module gating (enabled/disabled)
+  [ ] Emit rate-limited health events on sustained errors
+
+Heartbeat must:
+  [ ] Report per-channel status (healthy | error | disabled)
+  [ ] Include events_read_total and delta per channel
+  [ ] Include parse_failed_total per channel
+  [ ] Include last_event_ts if events were read
+  [ ] Be emitted every 5 seconds
+
+EvidencePtr must:
+  [ ] Be assigned ONLY at write time in capture_windows_rotating
+  [ ] Include stream_id="evtx:Windows"
+  [ ] Include segment_id (current segment identifier)
+  [ ] Include record_index (position in segment)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+F) TESTING REQUIREMENTS
+════════════════════════════════════════════════════════════════════════════════
+
+[ ] Mock mode still works
+    cargo run --bin capture_windows_rotating -- --with-mock-events fixture.jsonl
+    Result: events.jsonl created, heartbeat.json shows transport=mock
+
+[ ] Self-test mode (Windows only)
+    cargo run --bin capture_windows_rotating -- --self-test-windows
+    Result:
+      "Testing Windows event log ingestion (30s)..."
+      "✓ Sysmon: 42 events, 0 errors, last_ts=2025-12-22T12:34:56Z"
+      "✓ Security: 15 events, 0 errors, last_ts=2025-12-22T12:34:55Z"
+      "✓ System: 3 events, 0 errors"
+      "✗ TaskScheduler: unavailable (not enabled)"
+      "Coverage: 7 of 8 channels active (87%)"
+
+[ ] Bookmark persistence
+    - Run capture_windows_rotating for 10s
+    - Kill process
+    - Check telemetry/bookmarks.json exists and has entries
+    - Run again
+    - Verify no duplicate events in next segment
+
+[ ] Per-module gating
+    EDR_WIN_REGISTRY_ENABLED=false cargo run ...
+    Result: registry_monitor not called, heartbeat shows "disabled"
+
+[ ] Error handling
+    - Manually delete Sysmon channel
+    - Run capture_windows_rotating
+    - Result: ONE health event "Sysmon channel unavailable", continues with other channels
+
+═══════════════════════════════════════════════════════════════════════════════
+
+G) DELIVERABLES CHECKLIST
+═════════════════════════════════════════════════════════════════════════════════
+
+Code Files (NEW):
+  [ ] windows/sensors/evtx_reader.rs (EvtxReader + WEVTAPI bindings)
+  [ ] windows/telemetry/bookmarks.json (bookmark state persistence)
+
+Code Files (ENHANCED):
+  [ ] windows/sensors/evtx_collector.rs (poll() implementation)
+  [ ] windows/sensors/mod.rs (collect_all() function)
+  [ ] windows/capture_windows_rotating.rs (poll_and_write() wiring)
+  [ ] windows/config.rs (per-module gating rules)
+
+Documentation Files:
+  [ ] WINDOWS_TRUTH_TABLE.txt (completed)
+  [ ] WINDOWS_INGEST_DECISION.txt (completed)
+  [ ] WINDOWS_CLEANUP_CHECKLIST.txt (this file)
+
+Verification:
+  [ ] cargo check --lib (no errors)
+  [ ] cargo build (full build, no warnings about unused code)
+  [ ] cargo test (unit tests pass)
+  [ ] Mock mode: produces valid events.jsonl
+  [ ] Self-test mode: runs 30s, reports channel status
+  [ ] Bookmark: survives restart, no dupes
+
+═══════════════════════════════════════════════════════════════════════════════
+
+RESULT AFTER COMPLETION
+════════════════════════════════════════════════════════════════════════════════
+
+MODULES STATUS:
+  REAL_ACTIVE: evtx_collector, sysmon_adapter, registry_monitor, service_monitor,
+               task_scheduler_monitor, log_tamper_monitor, lateral_movement_monitor
+  (7 modules emitting real events from Windows Event Log)
+
+  REAL_INACTIVE: sysmon_adapter_ext (optional, conditional on Sysmon event IDs)
+
+  STUB: etw_adapter, defender_adapter (optional, requires special config)
+
+COVERAGE ACHIEVED:
+  ✓ Process creation + lineage (Sysmon 1, Security 4688)
+  ✓ Network connections (Sysmon 3)
+  ✓ File operations (Sysmon 11/26)
+  ✓ Registry persistence (Sysmon 13/14, registry_monitor)
+  ✓ Service creation (System 7045, service_monitor)
+  ✓ Task scheduler (TaskScheduler/Operational, task_scheduler_monitor)
+  ✓ Log tampering (Security 1102, 4912, log_tamper_monitor)
+  ✓ Lateral movement (Security 4624/4769, lateral_movement_monitor)
+  ✓ LSASS access (Sysmon 10, sysmon_adapter)
+  ✓ Injection/RemoteThread (Sysmon 8, sysmon_adapter)
+
+WINDOWS COVERAGE: 45-50% (up from 0%)
+
+ALWAYS-ON INGESTION:
+  ✓ Event Log subscription (WEVTAPI EvtSubscribe)
+  ✓ Fallback to polling (if subscription fails)
+  ✓ Bookmark persistence (no dupes, no restart from beginning)
+  ✓ Per-channel metrics (heartbeat.json)
+  ✓ Error transparency (health events, graceful degradation)
+  ✓ Per-module gating (enable/disable via env vars)
+
+VERIFICATION:
+  ✓ Mock mode works
+  ✓ Self-test mode works (reports channel status)
+  ✓ No panics on missing logs
+  ✓ Compiles without errors
+  ✓ Ready for Windows deployment
+
+═══════════════════════════════════════════════════════════════════════════════

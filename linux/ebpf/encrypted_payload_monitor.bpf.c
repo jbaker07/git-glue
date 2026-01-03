@@ -1,72 +1,112 @@
-// edr-agent/src/ebpf/encrypted_payload_monitor.bpf.c (ringbuf version)
+// ebpf/encrypted_payload_monitor.bpf.c
+// ON_DEMAND: Monitor read/recv syscalls for potential encrypted payloads
+// Gated by ondemand_enabled map
+// NO entropy computation in BPF (defer to userspace or skip)
+// Only tracks: fd, bytes_requested, syscall_id
+// NOTE: edr_events.h already defines the LICENSE symbol; do not redefine here.
 
-#include "vmlinux.h"
-#include <bpf/bpf_helpers.h>
+#if __has_include("include/edr_events.h")
+#  include "include/edr_events.h"
+#elif __has_include("../include/edr_events.h")
+#  include "../include/edr_events.h"
+#else
+#  include "edr_events.h"
+#endif
+
+/* Verify canonical struct size (384 bytes) */
+_Static_assert(sizeof(struct edr_event) == 384, "struct edr_event must be 384 bytes");
+
 #include <bpf/bpf_tracing.h>
-#include <bpf/bpf_core_read.h>
 
-char LICENSE[] SEC("license") = "Dual MIT/GPL";
+#define SAMPLE_RATE 100  // Only emit 1 in 100 events (very high volume syscalls)
 
-struct encrypted_payload_event {
-    __u32 pid;
-    __u32 bytes_requested;
-    __u32 fd;
-    __u64 timestamp;
-    __u8  buffer_preview[32]; // first 32 bytes
-};
-
-/* Ring buffer named "events" so edr_attach_any can reuse the shared
- * /sys/fs/bpf/edr/edr_events_rb if it’s already pinned.
- */
 struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 1 << 20); // 1 MiB fallback if not reusing shared rb
-} events SEC(".maps");
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} sample_counter SEC(".maps");
 
-/* sys_enter_read */
+/* tracepoint/syscalls/sys_enter_read(unsigned int fd, char *buf, size_t count) */
 SEC("tracepoint/syscalls/sys_enter_read")
-int trace_read(struct trace_event_raw_sys_enter* ctx)
+int tp_read(struct trace_event_raw_sys_enter *ctx)
 {
-    struct encrypted_payload_event *event;
-
-    event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
-    if (!event)
+    __u32 zero = 0;
+    __u8 *enabled = bpf_map_lookup_elem(&ondemand_enabled, &zero);
+    if (!enabled || !(*enabled))
         return 0;
 
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    event->pid = pid_tgid >> 32;
-    event->fd  = (__u32)ctx->args[0];
-    event->bytes_requested = (__u32)ctx->args[2];
-    event->timestamp = bpf_ktime_get_ns();
+    __u64 *counter = bpf_map_lookup_elem(&sample_counter, &zero);
+    if (!counter)
+        return 0;
 
-    void *user_buf = (void *)(unsigned long)ctx->args[1];
-    __builtin_memset(event->buffer_preview, 0, sizeof(event->buffer_preview));
-    bpf_probe_read_user(event->buffer_preview, sizeof(event->buffer_preview), user_buf);
+    __sync_fetch_and_add(counter, 1);
+    if ((*counter) % SAMPLE_RATE != 0)
+        return 0;
 
-    bpf_ringbuf_submit(event, 0);
+    // Emit lightweight event: just fd and bytes_requested
+    struct edr_event ev = {};
+    ev.type       = EVT_ENCRYPTED_PAYLOAD;
+    ev.syscall_id = SYS_read;
+    ev.tgid       = edr_tgid();
+    ev.fd         = (__s32)ctx->args[0];  // fd
+    ev.aux_u64    = ctx->args[2];  // count (bytes requested)
+
+    edr_emit(&ev);
     return 0;
 }
 
-/* sys_enter_recvfrom */
+/* tracepoint/syscalls/sys_enter_recvfrom(int sockfd, void *buf, size_t len, ...) */
 SEC("tracepoint/syscalls/sys_enter_recvfrom")
-int trace_recvfrom(struct trace_event_raw_sys_enter* ctx)
+int tp_recvfrom(struct trace_event_raw_sys_enter *ctx)
 {
-    struct encrypted_payload_event *event;
-
-    event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
-    if (!event)
+    __u32 zero = 0;
+    __u8 *enabled = bpf_map_lookup_elem(&ondemand_enabled, &zero);
+    if (!enabled || !(*enabled))
         return 0;
 
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    event->pid = pid_tgid >> 32;
-    event->fd  = (__u32)ctx->args[0];
-    event->bytes_requested = (__u32)ctx->args[2];
-    event->timestamp = bpf_ktime_get_ns();
+    __u64 *counter = bpf_map_lookup_elem(&sample_counter, &zero);
+    if (!counter)
+        return 0;
 
-    void *user_buf = (void *)(unsigned long)ctx->args[1];
-    __builtin_memset(event->buffer_preview, 0, sizeof(event->buffer_preview));
-    bpf_probe_read_user(event->buffer_preview, sizeof(event->buffer_preview), user_buf);
+    __sync_fetch_and_add(counter, 1);
+    if ((*counter) % SAMPLE_RATE != 0)
+        return 0;
 
-    bpf_ringbuf_submit(event, 0);
+    struct edr_event ev = {};
+    ev.type       = EVT_ENCRYPTED_PAYLOAD;
+    ev.syscall_id = SYS_recvfrom;
+    ev.tgid       = edr_tgid();
+    ev.fd         = (__s32)ctx->args[0];  // sockfd
+    ev.aux_u64    = ctx->args[2];  // len (bytes requested)
+
+    edr_emit(&ev);
+    return 0;
+}
+
+/* tracepoint/syscalls/sys_enter_recvmsg(int sockfd, struct msghdr *msg, int flags) */
+SEC("tracepoint/syscalls/sys_enter_recvmsg")
+int tp_recvmsg(struct trace_event_raw_sys_enter *ctx)
+{
+    __u32 zero = 0;
+    __u8 *enabled = bpf_map_lookup_elem(&ondemand_enabled, &zero);
+    if (!enabled || !(*enabled))
+        return 0;
+
+    __u64 *counter = bpf_map_lookup_elem(&sample_counter, &zero);
+    if (!counter)
+        return 0;
+
+    __sync_fetch_and_add(counter, 1);
+    if ((*counter) % SAMPLE_RATE != 0)
+        return 0;
+
+    struct edr_event ev = {};
+    ev.type       = EVT_ENCRYPTED_PAYLOAD;
+    ev.syscall_id = SYS_recvmsg;
+    ev.tgid       = edr_tgid();
+    ev.fd         = (__s32)ctx->args[0];  // sockfd
+
+    edr_emit(&ev);
     return 0;
 }

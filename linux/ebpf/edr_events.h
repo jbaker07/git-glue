@@ -2,7 +2,7 @@
 #ifndef __EDR_EVENTS_H
 #define __EDR_EVENTS_H
 
-#include "vmlinux.h"
+#include "include/vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
@@ -70,6 +70,9 @@ enum edr_evt_type {
     /* privilege */
     EVT_SETUID          = 50,
     EVT_CAPSET          = 51,
+
+    /* sensor meta */
+    EVT_SENSOR_HEALTH   = 255,  // heartbeat event (reserve_failed, lost_samples, etc.)
 };
 
 /* -------- ringbuf -------- */
@@ -78,13 +81,53 @@ struct {
     __uint(max_entries, 1 << 24); // 16MB
 } edr_events_rb SEC(".maps");
 
-/* -------- allowlist by syscall id (optional; set from userspace) -------- */
+/* -------- counter for ringbuf_reserve failures (per-cpu) -------- */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} edr_rb_reserve_failed SEC(".maps");
+
+/* -------- counter for events successfully reserved -------- */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} edr_events_reserved SEC(".maps");
+
+/* -------- per-pid sampling counters (LRU) -------- */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 16384);
+    __type(key, __u32);  // pid (key)
+    __type(value, __u64); // sample counter
+} edr_sample_counters SEC(".maps");
+
+/* -------- allow list by syscall id (optional; set from userspace) -------- */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 256);
     __type(key, __u32);  // syscall id
     __type(value, __u8); // 1=enabled
 } edr_allow_syscalls SEC(".maps");
+
+/* -------- protected PIDs for signal integrity (pinned, userspace-populated) -------- */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 128);
+    __type(key, __u32);  // pid (e.g., capture, init, systemd)
+    __type(value, __u8); // 1=protected
+} protected_pids SEC(".maps");
+
+/* -------- ON_DEMAND program enable gates (pinned, userspace-set) -------- */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16);
+    __type(key, __u32);  // program id (enum)
+    __type(value, __u8); // 1=enabled
+} ondemand_enabled SEC(".maps");
 
 /* -------- per-proc FD table (LRU) -------- */
 struct fd_key {
@@ -164,10 +207,15 @@ struct {
  * -------- userland event --------
  * IMPORTANT:
  *  - Natural 8-byte alignment is required by libbpf ringbuf.
- *  - On x86_64 this layout is 376 bytes; the Rust mirror expects 376.
+ *  - abi_version and event_size are mandatory first fields for version negotiation.
+ *  - On x86_64 this layout is 384 bytes; the Rust mirror must match.
  *  - Keep field order; add new fields only at the end to preserve ABI.
  */
 struct edr_event {
+    /* ABI Safety (version negotiation) */
+    __u32 abi_version; // MUST be 1 for this definition
+    __u32 event_size;  // MUST be 384 for this definition
+
     __u64 ts;          // ktime_ns
     __u32 type;        // edr_evt_type
     __u32 syscall_id;  // ctx->id
@@ -200,9 +248,9 @@ struct edr_event {
     char  comm[16];    // task comm
 } __attribute__((aligned(8)));    // ensure ringbuf-friendly alignment
 
-/* Hard guard for drift on 64-bit builds (Rust side expects 376). */
+/* Hard guard for drift on 64-bit builds (Rust side must match 384 bytes). */
 #if __SIZEOF_LONG__ == 8
-_Static_assert(sizeof(struct edr_event) == 376, "struct edr_event must be 376 bytes on x86_64");
+_Static_assert(sizeof(struct edr_event) == 384, "struct edr_event must be 384 bytes on x86_64");
 #endif
 
 static __always_inline __u32 edr_tgid(void) { return (__u32)(bpf_get_current_pid_tgid() >> 32); }
@@ -218,10 +266,25 @@ static __always_inline void edr_ppid_uid_comm(__u32 *ppid_out, char comm[16]) {
 }
 
 static __always_inline int edr_emit(struct edr_event *e) {
+    /* ABI negotiation fields */
+    e->abi_version = 1;
+    e->event_size = 384;
+    
     e->ts   = bpf_ktime_get_ns();
     e->uid  = edr_uid();
     edr_ppid_uid_comm(&e->ppid, e->comm);
-    return bpf_ringbuf_output(&edr_events_rb, e, sizeof(*e), 0);
+    
+    int ret = bpf_ringbuf_output(&edr_events_rb, e, sizeof(*e), 0);
+    if (ret == 0) {
+        __u32 key = 0;
+        __u64 *count = bpf_map_lookup_elem(&edr_events_reserved, &key);
+        if (count) __sync_fetch_and_add(count, 1);
+    } else {
+        __u32 key = 0;
+        __u64 *count = bpf_map_lookup_elem(&edr_rb_reserve_failed, &key);
+        if (count) __sync_fetch_and_add(count, 1);
+    }
+    return ret;
 }
 
 static __always_inline bool edr_allowed(__u32 id) {
@@ -232,6 +295,35 @@ static __always_inline bool edr_allowed(__u32 id) {
 static __always_inline void edr_copy_user_str(char *dst, const char *user, __u32 max) {
     if (!user || !max) return;
     bpf_probe_read_user_str(dst, max, user);
+}
+
+static __always_inline bool edr_should_sample(__u32 type, __u32 pid, bool is_root) {
+    // Always log root
+    if (is_root) return true;
+
+    __u32 sample_rate = 1;  // Default: always log
+
+    // Noisy hooks: sample based on type
+    if (type == EVT_OPEN)      sample_rate = 100;
+    if (type == EVT_WRITE)     sample_rate = 10000;
+    if (type == EVT_READ)      sample_rate = 100000;
+    if (type == EVT_BIND)      sample_rate = 10;
+    if (type == EVT_CONNECT)   sample_rate = 100;
+    if (type == EVT_SENDTO)    sample_rate = 1000;
+    if (type == EVT_SENDMSG)   sample_rate = 1000;
+    if (type == EVT_TCP_RETRANS) sample_rate = -1;  // Disabled (0)
+
+    if (sample_rate <= 0) return false;
+    if (sample_rate == 1) return true;
+
+    // Increment and check sample counter
+    __u64 *counter = bpf_map_lookup_elem(&edr_sample_counters, &pid);
+    __u64 count = 0;
+    if (counter) {
+        count = __sync_fetch_and_add(counter, 1);
+    }
+
+    return (count % sample_rate) == 0;
 }
 
 #endif /* __EDR_EVENTS_H */
