@@ -1,0 +1,21 @@
+{
+  "version": "1.0.0",
+  "bundle_meta": {
+    "bundle_id": "golden-edge_cases-imported_namespace_004",
+    "exported_at": "2025-01-01T00:00:00Z",
+    "exported_by": "golden-gen",
+    "redacted": false,
+    "hash_alg": "sha256",
+    "checksum": "532d93d89415e9352ecdf18d846f7cf0b23c8cb9923e7298972e047c33f4eadb",
+    "checksum_scope": "bundle_payload_sans_checksum"
+  },
+  "included_sections": {
+    "replay": true,
+    "recompute": true
+  },
+  "file_hashes": {
+    "recompute/config_snapshot.json": "6c0c54f2eb93ba3be49b0bcff2613122a08e0d6380af42e49d28b3b1c1441285",
+    "recompute/events.jsonl": "eace40b04de7f87c9b7785c14b941d826917396b555c5a6c6478cd303d8fc372",
+    "replay/report_bundle.json": "b03f64f7341633148afd6536fe06c36d9e333273e1f71e9f0ad4bac6cb015739"
+  }
+}

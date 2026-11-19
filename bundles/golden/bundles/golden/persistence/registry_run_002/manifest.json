@@ -1,0 +1,21 @@
+{
+  "version": "1.0.0",
+  "bundle_meta": {
+    "bundle_id": "golden-persistence-registry_run_002",
+    "exported_at": "2025-01-01T00:00:00Z",
+    "exported_by": "golden-gen",
+    "redacted": false,
+    "hash_alg": "sha256",
+    "checksum": "baaac45b4cd9ef933d29582c69e1bf2620cc6d8c2943708f68c54a0ba791a90e",
+    "checksum_scope": "bundle_payload_sans_checksum"
+  },
+  "included_sections": {
+    "replay": true,
+    "recompute": true
+  },
+  "file_hashes": {
+    "recompute/config_snapshot.json": "3bf6c1bd5296fca44b8293bca171420835353bc04988838bc0b7bef5c64ef703",
+    "recompute/events.jsonl": "bf9595a066afb55bf0f3fbd86282b5ff8789dac50b3147eb90b6cfbad68f656d",
+    "replay/report_bundle.json": "3e64acda49b781d136c451a930c00a949a73b53acf67e10e1a48b49931ded992"
+  }
+}

@@ -1,0 +1,344 @@
+================================================================================
+WINDOWS DEFAULT INGEST PATH: DECISION + IMPLEMENTATION PLAN
+December 22, 2025
+================================================================================
+
+OPTION ANALYSIS
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1: WEVTAPI EvtSubscribe (Recommended ✓)
+─────────────────────────────────────────────
+HOW: Real-time event log subscription using Windows Event Log API
+PROS:
+  ✓ Stable, well-documented Windows API
+  ✓ Real-time events (no polling latency)
+  ✓ Bookmark support (native, no custom tracking needed)
+  ✓ Covers all channels: Sysmon, Security, System, PowerShell, WMI, TaskScheduler
+  ✓ Single channel can emit many event types (cheaper than polling all)
+  ✓ Can filter at subscription time (XPath query reduces noise)
+  ✓ Works with elevation on enterprise systems (standard deployment)
+CONS:
+  - Requires elevation (run as Administrator or NT AUTHORITY\SYSTEM)
+  - More complex setup than polling
+  - Thread-based (needs callback management)
+DEPLOYMENT: Standard on enterprise Windows; typical EDR runs elevated anyway
+
+OPTION 2: EVTX Polling with Bookmarks (Fallback ○)
+────────────────────────────────────────────────────
+HOW: Periodic polling of Event Log with bookmark resumption
+PROS:
+  ✓ Works with lower privilege levels
+  ✓ Simpler synchronous polling loop
+  ✓ Easier to test (no async/threading complexity)
+  ✓ Bounded work per poll (controllable)
+CONS:
+  - Latency: events arrive 100-1000ms after creation
+  - Polling overhead: re-query even if no new events
+  - More bookmark complexity (manual tracking)
+DEPLOYMENT: Fallback for non-elevated scenarios; secondary to subscription
+
+OPTION 3: ETW (Not Recommended for Always-On)
+──────────────────────────────────────────────
+HOW: Event Tracing for Windows kernel-level tracing
+PROS:
+  ✓ Low overhead
+  ✓ Real-time kernel events
+CONS:
+  - Requires elevation + feature gate
+  - Kernel provider registration complex
+  - Session management required
+  - Non-SYSTEM processes can't read kernel traces reliably
+DEPLOYMENT: Optional enhancement for specific scenarios; not critical path
+
+═══════════════════════════════════════════════════════════════════════════════
+
+DECISION: OPTION 1 (WEVTAPI EvtSubscribe) AS PRIMARY
+         OPTION 2 (EVTX Polling) AS FALLBACK
+────────────────────────────────────────────────────────────────────────────────
+
+WHY:
+  - Event Log subscription is THE standard Windows logging API
+  - Native bookmark support (no custom state tracking needed)
+  - Covers 100% of required channels (Sysmon, Security, System, PowerShell, WMI, TaskScheduler)
+  - Real-time (no polling latency)
+  - Enterprise standard (EDR runs elevated)
+  - Simple to reason about: "subscribe → get events → process → bookmark moves forward"
+
+FALLBACK LOGIC:
+  - If EvtSubscribe fails (low privilege, API unavailable), fall back to EVTX polling
+  - Emit health event: "Windows Event Log subscription unavailable, using polling fallback"
+  - Same to_canonical_event() logic works for both (events are identical)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+IMPLEMENTATION PLAN: WEVTAPI EvtSubscribe Path
+════════════════════════════════════════════════════════════════════════════════
+
+STEP 1: Create windows/sensors/evtx_reader.rs (NEW, ~300 lines)
+──────────────────────────────────────────────────────────────
+
+Struct EvtxReader {
+  channels: Vec<String>,    // "Microsoft-Windows-Sysmon/Operational", etc.
+  subscriptions: HashMap<String, HEVENTXUBSCRIPTIONHandle>,  // keyed by channel
+  last_event_ts: HashMap<String, DateTime<Utc>>,
+  events_read_total: HashMap<String, u64>,
+  parse_failed_total: HashMap<String, u64>,
+  max_records_per_poll: u64,
+}
+
+impl EvtxReader {
+  pub fn new(channels: Vec<&str>, max_records_per_poll: u64) -> Result<Self, EvtxError>
+    - For each channel, call EvtSubscribe() with XPath filter for relevant event IDs
+    - Store handle in subscriptions
+    - Return Self with empty metrics
+
+  pub fn poll(&mut self) -> Result<(Vec<crate::Event>, EvtxMetrics), EvtxError>
+    - For each subscription:
+      - Call EvtNext(hSubscription, ...) to fetch up to max_records_per_poll events
+      - For each event:
+        - Call RenderEvent() to get XML
+        - Parse XML to EvtxRecord
+        - Call EvtxCollector::to_canonical_event() to convert
+        - Collect event + update metrics
+      - Handle errors (log cleared, lost records, etc.)
+    - Return (events, metrics) where metrics include per-channel stats
+
+  pub fn close(&mut self)
+    - Close all subscriptions
+}
+
+Also implement:
+  struct EvtxError { ... }
+  struct EvtxMetrics { events_per_channel: BTreeMap<String, u64>, ... }
+  Bindings to winapi: EvtSubscribe, EvtNext, RenderEvent, EvtClose, etc.
+
+STEP 2: Wire evtx_collector.poll()
+────────────────────────────────────
+Replace:
+  pub fn poll(...) -> PollResult {
+    #[cfg(not(target_os = "windows"))] { return empty }
+    #[cfg(target_os = "windows")] {
+      eprintln!("not implemented");
+      return empty;
+    }
+  }
+
+With:
+  pub fn poll(
+    &mut self,
+    _stream_id: &str,
+    _segment_id: &str,
+    _max_records: u64,
+  ) -> PollResult {
+    let mut events = Vec::new();
+    let mut parse_failed = 0;
+    let mut last_ts = None;
+
+    #[cfg(target_os = "windows")]
+    {
+      if self.reader.is_none() {
+        self.reader = EvtxReader::new(
+          self.enabled_logs.iter().map(|s| s.as_str()).collect(),
+          _max_records,
+        ).ok();
+      }
+      
+      if let Some(reader) = &mut self.reader {
+        match reader.poll() {
+          Ok((polled_events, metrics)) => {
+            for evt in polled_events {
+              if let Some(canonical) = self.to_canonical_event(&evt) {
+                events.push(canonical);
+                if let Some(ts) = last_ts {
+                  last_ts = Some(std::cmp::max(ts, evt.ts));
+                } else {
+                  last_ts = Some(evt.ts);
+                }
+              } else {
+                parse_failed += 1;
+              }
+            }
+            self.last_metrics = metrics;
+          }
+          Err(e) => {
+            eprintln!("[evtx_collector] poll error: {:?}", e);
+            parse_failed += 1;
+          }
+        }
+      }
+    }
+
+    PollResult {
+      events,
+      parse_failed_count: parse_failed,
+      last_record_ts: last_ts,
+    }
+  }
+
+STEP 3: Create collect_all() in windows/sensors/mod.rs
+─────────────────────────────────────────────────────────
+pub fn collect_all(host: &crate::linux::host::HostCtx, cfg: &crate::windows::config::SourceConfig) -> Vec<crate::Event> {
+  let mut events = Vec::new();
+
+  // Poll evtx_collector (main ingestion)
+  let result = self.evtx_collector.poll(...);
+  events.extend(result.events);
+  
+  // Check gating for each optional module
+  if cfg::should_poll("registry_monitor").0 {
+    // Read Sysmon 13/14 from evtx_collector result
+    // (pass events to registry_monitor for further enrichment)
+  }
+  
+  if cfg::should_poll("service_monitor").0 {
+    // Same as above
+  }
+  
+  // ... etc for other monitors
+  
+  // Return all events
+  events
+}
+
+(More details: collect_all() needs to decide on data sharing - either pass events
+through monitors sequentially, or have each monitor open Event Log independently.
+Recommended: evtx_collector opens log, passes to all monitors in single poll cycle.)
+
+STEP 4: Wire capture_windows_rotating.poll_and_write()
+────────────────────────────────────────────────────────
+  pub fn poll_and_write(&mut self) -> Result<()> {
+    let events = windows::sensors::collect_all(&self.host, &self.config);
+    
+    // Assign EvidencePtr at write time
+    for evt in &mut events {
+      if evt.evidence_ptr.is_none() {
+        evt.evidence_ptr = Some(EvidencePtr {
+          stream_id: "evtx:Windows".to_string(),
+          segment_id: self.current_segment_id.clone(),
+          record_index: self.record_index,
+        });
+        self.record_index += 1;
+      }
+    }
+    
+    // Write to segment + update heartbeat
+    self.write_segment(events)?;
+    self.emit_heartbeat()?;
+    Ok(())
+  }
+
+STEP 5: Bookmark Persistence
+──────────────────────────────
+Create windows/telemetry/bookmarks.json:
+  {
+    "Microsoft-Windows-Sysmon/Operational": "base64-encoded-bookmark-xml",
+    "Security": "...",
+    "System": "...",
+    ...
+  }
+
+On startup: Load bookmarks.json, pass to EvtxReader
+On each successful poll: Update bookmarks.json with new state
+Ensures: Never lose events, never re-read old events across restarts
+
+STEP 6: Per-Module Gating
+──────────────────────────
+In collect_all(), before calling each monitor:
+  let (should_poll, cfg) = windows::config::should_poll("module_name");
+  if !should_poll {
+    continue; // Skip this module this poll
+  }
+
+If module is still stubbed/not implemented:
+  emit ONE rate-limited sensor_health event:
+    { ts, tags: ["windows", "module_name"], level: "info",
+      message: "module not implemented; requires real Windows API integration" }
+  return empty Vec<Event>
+
+STEP 7: Enhanced Heartbeat
+──────────────────────────
+Per-channel metrics (emitted to heartbeat.json every 5s):
+  {
+    "ts": "2025-12-22T12:34:56Z",
+    "transport": "evtx",
+    "channels": [
+      {
+        "name": "Sysmon",
+        "events_read_total": 1234,
+        "events_read_delta": 12,
+        "parse_failed_total": 2,
+        "parse_failed_delta": 0,
+        "last_event_ts": "2025-12-22T12:34:50Z",
+        "status": "healthy"
+      },
+      { ... for Security, System, PowerShell, etc. }
+    ]
+  }
+
+═══════════════════════════════════════════════════════════════════════════════
+
+AFTER IMPLEMENTATION: STATUS OF EACH MODULE
+════════════════════════════════════════════════════════════════════════════════
+
+MODULE                      | BEFORE       | AFTER            | WIRED?
+────────────────────────────────────────────────────────────────────────────────
+evtx_collector              | REAL_INACTIVE| REAL_ACTIVE      | ✓ YES
+sysmon_adapter              | REAL_INACTIVE| REAL_ACTIVE*     | ✓ YES*
+registry_monitor            | REAL_INACTIVE| REAL_ACTIVE*     | ✓ YES*
+service_monitor             | REAL_INACTIVE| REAL_ACTIVE*     | ✓ YES*
+task_scheduler_monitor      | REAL_INACTIVE| REAL_ACTIVE*     | ✓ YES*
+log_tamper_monitor          | REAL_INACTIVE| REAL_ACTIVE*     | ✓ YES*
+lateral_movement_monitor    | REAL_INACTIVE| REAL_ACTIVE*     | ✓ YES*
+sysmon_adapter_ext          | REAL_INACTIVE| REAL_INACTIVE**  | ✗ NO
+etw_adapter                 | STUB         | STUB             | ✗ NO
+defender_adapter            | STUB         | STUB             | ✗ NO
+evidence_deref_example      | EXAMPLE      | EXAMPLE          | ✗ NO
+────────────────────────────────────────────────────────────────────────────────
+
+*  = Shares data from evtx_collector (parse once, use by many monitors)
+** = Requires extended Sysmon event IDs; will be wired if Sysmon supports them
+✓  = Called from collect_all() and emitting events
+✗  = Optional; can be wired later if needed
+
+═══════════════════════════════════════════════════════════════════════════════
+
+FALLBACK TO EVTX POLLING (if EvtSubscribe fails)
+═════════════════════════════════════════════════════════════════════════════
+
+If EvtSubscribe() returns ERROR_ACCESS_DENIED or similar:
+  1. Emit ONE sensor_health event: "Event Log subscription failed, falling back to polling"
+  2. Create EvtxPoller (alternative to EvtxReader)
+  3. Same interface: pub fn poll() -> Result<(Vec<Event>, Metrics)>
+  4. Uses EvtQuery + EvtNext + bookmark tracking manually
+  5. All to_canonical_event() logic remains identical
+  6. Difference: latency ~500ms instead of real-time
+
+Fallback is transparent: capture_windows_rotating doesn't care which reader is used.
+
+═══════════════════════════════════════════════════════════════════════════════
+
+TESTING STRATEGY
+════════════════════════════════════════════════════════════════════════════════
+
+1. MOCK MODE (all platforms)
+   - Still works: --with-mock-events fixture.jsonl
+   - Exercises all to_canonical_event() logic
+   - No Windows APIs called
+   - Validates output format
+
+2. SELF-TEST MODE (Windows only)
+   - --self-test-windows (runs 30s, reports metrics)
+   - EvtxReader attempts to subscribe to Sysmon channel
+   - If successful: reports events read per channel + heartbeat
+   - If failed: reports "subscription unavailable; using fallback" + falls back
+   - Prints: "✓ Sysmon: 15 events, 0 errors" or "✗ Sysmon: unavailable"
+   - Final report: "Total coverage: 85% (7 of 8 channels active)"
+
+3. MANUAL VERIFICATION (on Windows)
+   - Open Event Viewer
+   - Create test process: powershell.exe "Get-Help"
+   - Run capture_windows_rotating --run 10s
+   - Check heartbeat.json: should show >0 events from Sysmon or Security
+   - Check segment JSONL: should contain process creation event
+
+═══════════════════════════════════════════════════════════════════════════════

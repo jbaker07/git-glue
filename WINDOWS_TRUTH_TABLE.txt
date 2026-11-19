@@ -1,0 +1,280 @@
+================================================================================
+WINDOWS SENSORS: TRUTH TABLE (UNFILTERED REALITY)
+Generated: 2025-12-22
+================================================================================
+
+FORMAT:
+  Module | Status | Source | Wired? | Emits? | Real APIs | Missing to be REAL
+────────────────────────────────────────────────────────────────────────────────
+
+1. EVTX_COLLECTOR.RS
+   Status: REAL_INACTIVE (conversion logic exists, poll() is placeholder stub)
+   Source: Windows Event Log (via WEVTAPI EvtOpenLog/EvtSubscribe or polling)
+   Wired?: NO (not called from capture_windows_rotating)
+   Emits?: CONDITIONALLY (to_canonical_event() exists, but poll() returns empty)
+   Real APIs: NONE (poll() method has #[cfg(not(target_os="windows"))] fallback to Vec::new())
+   Missing to be REAL:
+     - EvtOpenLog(channel_name, flags) call
+     - EvtCreateRenderContext() for XML rendering
+     - EvtQuery(hLog, query_xpath, ...) to fetch events
+     - EvtNext(hResults, ...) in a loop up to max_records_per_poll
+     - RenderEvent() for each record to extract XML
+     - XML parsing → EvtxRecord → to_canonical_event()
+     - Bookmark persistence (EvtCreateBookmark, EvtUpdateBookmark)
+     - Error handling for closed logs, lost records, etc.
+
+2. SYSMON_ADAPTER.RS
+   Status: REAL_INACTIVE (to_canonical_event() exists, is_available hardcoded false)
+   Source: Sysmon Event Log (Microsoft-Windows-Sysmon/Operational channel)
+   Wired?: NO
+   Emits?: CONDITIONALLY (to_canonical_event() exists but adapter never instantiated or called)
+   Real APIs: NONE (available: bool is hardcoded false, no event log reader)
+   Missing to be REAL:
+     - Check for Sysmon installed (registry check or open log channel)
+     - Read from Microsoft-Windows-Sysmon/Operational via EvtOpenLog
+     - Filter EventID 1 (process), 3 (network), 7 (imageload), 10 (lsass), 11 (filecreate), 13 (regvalue), 22 (dns), 26 (filedelete)
+     - Parse XML → SysmonEvent struct
+     - Call to_canonical_event() and emit
+     - Bookmarking to avoid re-reading
+
+3. SYSMON_ADAPTER_EXT.RS
+   Status: REAL_INACTIVE (to_canonical_event() exists, is_available hardcoded false)
+   Source: Sysmon Event Log (extended event IDs)
+   Wired?: NO
+   Emits?: CONDITIONALLY (to_canonical_event() exists but never called)
+   Real APIs: NONE (available: false hardcoded)
+   Missing to be REAL:
+     - Same as sysmon_adapter: open log, filter EventID 8/10/15/17/18/19/20/21/25/26
+     - Call to_canonical_event() for each
+
+4. ETW_ADAPTER.RS
+   Status: STUB (to_canonical_event() exists, but available=false hardcoded AND no ETW session setup)
+   Source: ETW (Microsoft-Windows-Kernel-Process, Kernel-ImageLoad, TCPIP)
+   Wired?: NO
+   Emits?: NO (available is never true, no session exists, no event reading)
+   Real APIs: NONE
+   Missing to be REAL:
+     - Feature gate: #[cfg(feature = "windows_etw")] for ETW-specific code
+     - EvtxCreateSession() or TraceOpenConsumer()
+     - Register for kernel providers (process, image, TCP/IP)
+     - Read events in a loop
+     - Parse TraceEvent / EtwEvent struct
+     - Call to_canonical_event()
+     - This is OPTIONAL (not recommended for always-on)
+
+5. DEFENDER_ADAPTER.RS
+   Status: STUB (to_canonical_event() exists, available=false hardcoded, no Defender API calls)
+   Source: Defender for Endpoint logs (Microsoft-Windows-Windows Defender/Operational, AMSI/Operational)
+   Wired?: NO
+   Emits?: NO (available is never true)
+   Real APIs: NONE
+   Missing to be REAL:
+     - Check registry for Defender presence
+     - Open log channel Microsoft-Windows-Windows Defender/Operational
+     - Filter EventID 1116/1117/1121 (threat detection)
+     - Also try AMSI channel for 1101/1102
+     - Parse and call to_canonical_event()
+     - OR: Use WMI Win32_ThreatTrackingEvent if available
+     - This is OPTIONAL (not all machines have Defender)
+
+6. REGISTRY_MONITOR.RS
+   Status: REAL_INACTIVE (to_canonical_event() exists, NOT called from polling)
+   Source: Event Log - Sysmon EventID 12/13/14 (registry events) + Security 4657 (registry value set)
+   Wired?: NO
+   Emits?: NO (conversion exists, but never called)
+   Real APIs: NONE (just conversion logic)
+   Missing to be REAL:
+     - Open Sysmon log channel (Microsoft-Windows-Sysmon/Operational)
+     - Filter EventID 12 (registry object created/deleted), 13 (value set), 14 (renamed)
+     - Parse XML → RegistryEvent
+     - Call to_canonical_event() + check for persistence key patterns (HKCU\...\Run, Winlogon, IFEO, Services)
+     - Emit with tags ["registry", "persistence"] if key is in persistence location
+     - Also read Security 4657 (registry value set by specific accounts)
+     - Bookmarking
+
+7. SERVICE_MONITOR.RS
+   Status: REAL_INACTIVE (to_canonical_event() exists, NOT called)
+   Source: Event Log - System EventID 7045 (service installed) + Security 4697 (service registry modified)
+   Wired?: NO
+   Emits?: NO
+   Real APIs: NONE (conversion only)
+   Missing to be REAL:
+     - Open System log channel
+     - Filter EventID 7045
+     - Parse XML → ServiceEvent
+     - Call to_canonical_event()
+     - Optionally: look up PID of service process for correlation
+     - Bookmarking
+
+8. TASK_SCHEDULER_MONITOR.RS
+   Status: REAL_INACTIVE (to_canonical_event() exists, NOT called)
+   Source: Event Log - Microsoft-Windows-TaskScheduler/Operational EventID 106 (created), 140 (updated), 200 (executed)
+   Wired?: NO
+   Emits?: NO
+   Real APIs: NONE (conversion only)
+   Missing to be REAL:
+     - Open TaskScheduler/Operational log
+     - Filter EventID 106/140/200
+     - Parse XML → TaskSchedulerEvent
+     - Call to_canonical_event()
+     - Bookmarking
+
+9. LOG_TAMPER_MONITOR.RS
+   Status: REAL_INACTIVE (to_canonical_event() exists, NOT called)
+   Source: Event Log - Security EventID 1102 (log cleared), 4688 (process created with log-tampering tool cmdline), 4912 (audit policy change)
+   Wired?: NO
+   Emits?: NO
+   Real APIs: NONE (conversion only)
+   Missing to be REAL:
+     - Open Security log
+     - Filter EventID 4688, 1102, 4912
+     - Parse XML → LogTamperEvent
+     - Call to_canonical_event()
+     - Heuristic: detect wevtutil, Clear-EventLog, Remove-EventLog, powershell with SecurityLog in cmdline
+     - Bookmarking
+
+10. LATERAL_MOVEMENT_MONITOR.RS
+    Status: REAL_INACTIVE (to_canonical_event() exists, NOT called)
+    Source: Event Log - Security EventID 4624 (successful logon), 4769 (Kerberos service ticket requested)
+    Wired?: NO
+    Emits?: NO
+    Real APIs: NONE (conversion only)
+    Missing to be REAL:
+      - Open Security log
+      - Filter EventID 4624 (with logon_type 3=network or 10=RDP), 4769
+      - Parse XML → LateralMovementEvent
+      - Call to_canonical_event()
+      - Heuristic: flag non-localhost source IPs on network logons
+      - Bookmarking
+
+11. EVIDENCE_DEREF_EXAMPLE.RS
+    Status: EXAMPLE (no conversion logic, no event reading, purely illustrative)
+    Source: None
+    Wired?: NO
+    Emits?: NO
+    Real APIs: NONE
+    Missing: This is intentionally a stub for reference.
+
+12. CAPTURE_WINDOWS_ROTATING.RS
+    Status: MOCK_ONLY (has with_mock_events(), no real polling from Event Log)
+    Source: Mock JSONL fixtures only
+    Wired?: N/A (mock mode)
+    Emits?: YES (writes mock events to JSONL)
+    Real APIs: NONE (no Windows Event Log reading)
+    Missing to be REAL:
+      - poll_and_write() must call evtx_collector.poll() or similar
+      - Must call collect_all() to aggregate from all modules
+      - Must read from Windows Event Log (WEVTAPI)
+      - Must persist bookmarks
+      - Must emit heartbeat metrics
+
+================================================================================
+DECISION MATRIX: STATUS CLASSIFICATION
+================================================================================
+
+REAL_ACTIVE:
+  - Has real Windows API calls (EvtOpenLog, EvtNext, etc.)
+  - Is called from capture_windows_rotating
+  - Returns actual events via to_canonical_event()
+  ✗ NONE currently qualify
+
+REAL_INACTIVE:
+  - Has real to_canonical_event() conversion logic
+  - NOT called from capture
+  - Waiting to be wired
+  ✓ evtx_collector, sysmon_adapter, sysmon_adapter_ext, registry_monitor, service_monitor, task_scheduler_monitor, log_tamper_monitor, lateral_movement_monitor
+  (8 modules)
+
+MOCK_ONLY:
+  - Reads from fixtures or mock mode
+  - No real Windows APIs
+  ✓ capture_windows_rotating (currently)
+
+STUB:
+  - Conversion logic exists but is_available = false hardcoded
+  - Never opens real event logs
+  - Would need significant work to implement
+  ✓ etw_adapter, defender_adapter
+  (2 modules)
+
+DEAD:
+  - Not used, not called, not referenced
+  ✗ evidence_deref_example (intentional reference)
+
+================================================================================
+THE GAP ANALYSIS
+================================================================================
+
+WHAT WE HAVE:
+  ✓ 8 modules with complete to_canonical_event() logic
+  ✓ 1 module (evtx_collector) with event ID filtering
+  ✓ Config gating system (windows/config.rs)
+  ✓ Heartbeat metrics struct
+
+WHAT WE DON'T HAVE:
+  ✗ Windows Event Log reader (EvtOpenLog/EvtNext not called)
+  ✗ Sysmon event stream reader (using WEVTAPI)
+  ✗ Bookmark persistence (survive process restart without re-reading from beginning)
+  ✗ collect_all() function that aggregates from all modules
+  ✗ Polling loop integration in capture_windows_rotating
+  ✗ Per-module gating enforcement
+  ✗ Error handling: graceful degradation if log unavailable
+  ✗ Metrics: per-channel events_read_total, parse_failed, last_event_ts
+
+HOW TO FIX (PRIORITY ORDER):
+  1. Implement EvtxReader (wrapper around WEVTAPI) that:
+     - Opens log channel
+     - Creates/restores bookmark
+     - Queries up to max_records_per_poll events
+     - Returns Vec<Event> + metrics
+  2. Wire evtx_collector.poll() to use EvtxReader (currently returns empty)
+  3. Create collect_all(host, cfg) that calls each module.collect(host)
+  4. Wire capture_windows_rotating.poll_and_write() to call collect_all()
+  5. Implement per-module gating (check config before calling each module)
+  6. Add bookmark persistence (sqlite or JSON per channel)
+  7. Update heartbeat to emit per-channel metrics
+  8. Add self-test mode to verify end-to-end
+
+================================================================================
+WHAT MUST REMAIN STUB (AND WHY)
+================================================================================
+
+ETW_ADAPTER.RS:
+  Why: ETW requires elevation, feature gate, complex session setup
+  When: Only if specifically requested and testing on elevated Windows
+  Status: Optional enhancement, not critical path
+  Fallback: WEVTAPI (Event Log) covers 95% of use cases
+
+DEFENDER_ADAPTER.RS:
+  Why: Not all machines have Defender; depends on Defender for Endpoint license
+  When: Only if Defender is present and accessible
+  Status: Optional detection, not critical path
+  Fallback: Sysmon + Security log cover most indicators
+
+================================================================================
+ACTION ITEMS (IN ORDER)
+================================================================================
+
+IMMEDIATE (make modules REAL_ACTIVE):
+  1. Create windows/sensors/evtx_reader.rs with EvtxReader struct + WEVTAPI bindings
+  2. Enhance evtx_collector.poll() to use EvtxReader instead of returning empty
+  3. Create windows/sensors/mod.rs collect_all() function
+  4. Wire capture_windows_rotating.poll_and_write() to call collect_all()
+  5. Implement bookmark persistence (JsonBookmarkStore or similar)
+  6. Add per-module gating: if !config::should_poll(module_name) { return Vec::new() }
+  7. Update heartbeat to report per-channel metrics + health
+
+FOLLOW-UP (after core wiring works):
+  8. Wire sysmon_adapter to collect_all()
+  9. Wire registry_monitor to collect_all()
+  10. Wire service_monitor to collect_all()
+  11. Wire task_scheduler_monitor to collect_all()
+  12. Wire log_tamper_monitor to collect_all()
+  13. Wire lateral_movement_monitor to collect_all()
+  14. Add self-test mode
+
+OPTIONAL (only if time/priority permits):
+  15. Enhance Defender adapter (low priority)
+  16. Implement ETW (only with feature gate)
+
+================================================================================

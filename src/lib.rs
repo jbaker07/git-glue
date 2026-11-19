@@ -1,64 +1,19 @@
-pub mod adaptive_threshold_engine;
-pub mod alert;
-pub mod baselines;
-pub mod calibration;
-pub mod config;
-pub mod decision;
-pub mod detect;
-pub mod detectors;
-pub mod ecs_sink; // main.rs referenced this name     // only if you plan to call it
-pub mod elastic_bulk;
-pub mod elliptic_envelope;
-pub mod episode;
-pub mod event;
-pub mod explain;
-pub mod features;
-pub mod forensic;
-pub mod gnn_bridge;
-pub mod gnn_hook;
-pub mod gnn_models;
-pub mod graph_builder;
-pub mod graph_snapshot_writer;
-pub mod incidents;
-pub mod ingest;
-pub mod ioc;
-pub mod logger;
-pub mod mahalanobis;
-pub mod memory_priv;
-pub mod metrics;
-pub mod modules;
-pub mod net_cadence;
-pub mod pb_adapter;
-pub mod pb_api;
-pub mod pb_engine;
-pub mod pb_introspect;
-pub mod pb_wiring;
-pub mod pcb;
-pub mod pcb_emitter;
-pub mod pending;
-pub mod persist;
-pub mod pipeline;
-pub mod quantiles;
-pub mod relay;
-pub mod replay_scheduler;
-pub mod risk_alert_writer;
-pub mod robust_z;
-pub mod score_reason;
-pub mod services;
-pub mod session_explainer;
-pub mod session_trust_curve;
-pub mod slack_webhook;
-pub mod splunk_hec;
-pub mod stdout_sink;
-pub mod syscall_emitter;
-pub mod tamper;
-pub mod telemetry;
-pub mod telemetry_types;
-pub mod telemetry_writer;
-pub mod traits;
-pub mod trust_digest_engine;
-pub mod trust_hook;
-pub mod utils;
-pub mod vendor_fusion;
-pub mod yara_layer;
-pub mod yara_sidecar;
+//! EDR Forensic Hooks - Root Library
+//!
+//! This crate re-exports the workspace crates for unified access.
+//! For new code, prefer importing from the individual crates directly:
+//!
+//! - `edr_core` - Core types (Event, EvidencePtr)
+//! - `edr_locald` - Detection daemon (SignalOrchestrator, Pipeline)
+//! - `agent_macos` - macOS agent
+//! - `agent_linux` - Linux agent
+//! - `agent_windows` - Windows agent
+//! - `workbench` - Attack documentation workbench
+//! - `edr_server` - HTTP API server
+
+// Re-export workspace crates
+pub use edr_core as core;
+pub use edr_locald as locald;
+
+// Legacy module for mock data (still used by some tests)
+pub mod mock;

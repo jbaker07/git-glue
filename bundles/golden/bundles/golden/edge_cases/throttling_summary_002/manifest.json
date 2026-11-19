@@ -1,0 +1,21 @@
+{
+  "version": "1.0.0",
+  "bundle_meta": {
+    "bundle_id": "golden-edge_cases-throttling_summary_002",
+    "exported_at": "2025-01-01T00:00:00Z",
+    "exported_by": "golden-gen",
+    "redacted": false,
+    "hash_alg": "sha256",
+    "checksum": "19d74dedabd8e2570e69b6cb28a8bdf03c61c69f7e5987e0ce2f51582ecb4a4c",
+    "checksum_scope": "bundle_payload_sans_checksum"
+  },
+  "included_sections": {
+    "replay": true,
+    "recompute": true
+  },
+  "file_hashes": {
+    "recompute/config_snapshot.json": "ae10ba95aa33ddccdd2c5c15983bbaafe6e2cf1b2be163bcd0fad8a8a4923e7c",
+    "recompute/events.jsonl": "7fd5fa78e41e13eb435704140f9829160d28af88f885b13b36d0a72c579d2ceb",
+    "replay/report_bundle.json": "24f7a2889118178a883733b3e87166001ce02d22306133a75a31eaa6864cc4d5"
+  }
+}
